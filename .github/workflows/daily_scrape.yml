@@ -1,0 +1,30 @@
+name: Daily MLB Data Scrape
+
+on:
+  schedule:
+    # This runs at 14:00 UTC every day (which is 9:00 AM Central Time)
+    - cron: '0 14 * * *'
+  workflow_dispatch: # This adds a "Play" button so you can run it manually
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pybaseball pandas gspread oauth2client
+
+      - name: Run Scraper
+        # This tells the virtual robot to run your script
+        run: python src/scraper.py
+        env:
+          # We will set this "Secret" in the next step so your key is safe
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_JSON }}
