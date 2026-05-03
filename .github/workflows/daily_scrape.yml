@@ -2,21 +2,22 @@ name: Daily MLB Scraper
 
 on:
   schedule:
-    # This runs at 13:00 UTC every day (8:00 AM Central Time)
+    # Runs at 13:00 UTC (8:00 AM Central Time) every day
     - cron: '0 13 * * *'
   workflow_dispatch: 
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Forces GitHub to use Node 24 for the runner
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout code
-        # Updated from v3 to v4
         uses: actions/checkout@v4
 
       - name: Set up Python
-        # Updated from v4 to v5
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
