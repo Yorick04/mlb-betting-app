@@ -4,7 +4,7 @@ on:
   schedule:
     # This runs at 13:00 UTC every day (8:00 AM Central Time)
     - cron: '0 13 * * *'
-  workflow_dispatch: # This allows you to run it manually from GitHub
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -12,10 +12,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        # Updated from v3 to v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        # Updated from v4 to v5
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -26,7 +28,6 @@ jobs:
 
       - name: Run scraper
         env:
-          # This pulls your secrets from GitHub's vault
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
         run: python src/scraper.py
