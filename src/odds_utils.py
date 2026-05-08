@@ -9,7 +9,8 @@ def get_mlb_odds():
     if not api_key:
         return {}
 
-    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey={api_key}&regions=us&markets=h2h,totals&oddsFormat=american"
+    # Added &bookmakers=draftkings to ensure we only get DK lines
+    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey={api_key}&regions=us&markets=h2h,totals&bookmakers=draftkings&oddsFormat=american"
     
     try:
         response = requests.get(url)
@@ -26,7 +27,7 @@ def get_mlb_odds():
             book_name = "N/A"
 
             if game.get('bookmakers'):
-                # Grab the first bookmaker available
+                # Since we filtered the API, index 0 is guaranteed to be DraftKings
                 bookmaker_info = game['bookmakers'][0]
                 book_name = bookmaker_info.get('title', 'Unknown')
                 
@@ -41,10 +42,10 @@ def get_mlb_odds():
                             if outcome['name'] == 'Over':
                                 total = outcome.get('point', "N/A")
 
-            # Added 'book' to the dictionary
             odds_dict[game_key] = {"ml": ml, "total": total, "book": book_name}
         
         return odds_dict
+
     except Exception as e:
-        print(f"Odds API Error: {e}")
+        print(f"Error fetching odds: {e}")
         return {}

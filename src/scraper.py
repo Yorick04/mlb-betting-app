@@ -1,107 +1,119 @@
 import os
-import json
-import pandas as pd
+from dotenv import load_dotenv
 import requests
+import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from dotenv import load_dotenv
 from datetime import datetime
 import pytz
 
-# Local Imports
 from odds_utils import get_mlb_odds
 from weather_utils import get_stadium_weather
 
-# Load environment variables
 load_dotenv(override=True)
 
 def get_google_sheet_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     env_json = os.getenv("GOOGLE_SHEETS_JSON")
-    if env_json:
-        creds_info = json.loads(env_json)
-        return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
-    return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name('service_account_key.json', scope))
+    creds_info = json.loads(env_json)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
+    return gspread.authorize(creds)
 
-def get_mlb_daily_schedule(date_str):
-    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={date_str}&hydrate=probablePitcher"
-    try:
-        response = requests.get(url).json()
-        games = []
-        if "dates" in response and response["dates"]:
-            for game in response["dates"][0]["games"]:
-                home_p = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBA')
-                away_p = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBA')
-                games.append({
-                    'game_utc': game['gameDate'],
-                    'home_name': game['teams']['home']['team']['name'],
-                    'away_name': game['teams']['away']['team']['name'],
-                    'home_pitcher': home_p,
-                    'away_pitcher': away_p
-                })
-        return pd.DataFrame(games)
-    except Exception as e:
-        print(f"Error fetching MLB schedule: {e}")
-        return pd.DataFrame()
+def check_headers(sheet):
+    first_row = sheet.row_values(1)
+    headers = [
+        "Date/Time (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", 
+        "Bookmaker", "ML Odds", "O/U Total", "Temp", "Wind", 
+        "Humidity", "Value Alert", "Actual Total", "Result"
+    ]
+    if not first_row or first_row[0] == "":
+        print("Headers missing. Rebuilding...")
+        sheet.insert_row(headers, 1)
+        sheet.format("A1:N1", {"textFormat": {"bold": True}})
+        sheet.update_title("Master")
 
 def run_scraper():
-    today = datetime.now().strftime('%Y-%m-%d')
-    print(f"--- Starting Pipeline for {today} ---")
+    print("--- Starting MLB Scrape with Upsert Logic ---")
+    
+    client = get_google_sheet_client()
+    sheet = client.open("mlb-betting-app").worksheet("Master")
+    check_headers(sheet)
+    
+    today = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
 
-    schedule = get_mlb_daily_schedule(today)
-    if schedule.empty:
-        print("No games scheduled.")
-        return
-
+    print("Fetching odds and schedule...")
     odds_data = get_mlb_odds()
     
-    try:
-        client = get_google_sheet_client()
-        sheet = client.open("mlb-betting-app").sheet1
-        sheet.clear()
-    except Exception as e:
-        print(f"Sheets Error: {e}")
-        return
+    schedule_url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}&hydrate=probablePitcher"
+    games = requests.get(schedule_url).json().get('dates', [{}])[0].get('games', [])
 
-    final_data = []
-    # Added "Bookmaker" to the headers
-    headers = ["Date/Time (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", "Bookmaker", "ML Odds", "O/U Total", "Temp", "Wind", "Humidity", "Value Alert"]
+    # --- UPSERT LOGIC SETUP ---
+    # 1. Get all current rows to map existing games
+    existing_rows = sheet.get_all_values()
+    row_map = {}
+    
+    # Start loop at 1 to skip headers. Add 1 to index because Sheets are 1-indexed.
+    for i, row in enumerate(existing_rows):
+        if i == 0: continue 
+        # Create a unique key: Date_Home_Away
+        if len(row) >= 3:
+            key = f"{row[0]}_{row[1]}_{row[2]}"
+            row_map[key] = i + 1 
 
-    for _, row in schedule.iterrows():
-        # Time conversion
-        utc_dt = datetime.strptime(row['game_utc'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
-        local_dt = utc_dt.astimezone(pytz.timezone("US/Central"))
-        game_time_str = local_dt.strftime("%m/%d %I:%M %p")
+    games_to_append = []
 
-        home_team = row['home_name']
-        away_team = row['away_name']
+    for game in games:
+        home = game['teams']['home']['team']['name']
+        away = game['teams']['away']['team']['name']
         
-        weather = get_stadium_weather(home_team)
+  # 1. Grab the official game time from the MLB API
+        game_time = game.get('gameDate', 'N/A')
+        
+        hp = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBD')
+        ap = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBD')
+        
+        weather = get_stadium_weather(home, game_time)
         if weather:
-            temp_val, wind_val = weather["temp"], weather["wind_speed"]
-            w_txt, wind_txt, hum_txt = f"{temp_val}°F", f"{wind_val} MPH @ {weather['wind_deg']}°", f"{weather['humidity']}%"
+            temp = weather['temp']
+            wind = weather['wind_speed']
+            hum = weather['humidity']
         else:
-            w_txt, wind_txt, hum_txt, temp_val, wind_val = "N/A", "N/A", "N/A", None, None
+            temp, wind, hum = "N/A", "N/A", "N/A"
 
-        # Fetch odds and book name
-        lookup_key = f"{home_team}_{away_team}"
-        game_odds = odds_data.get(lookup_key, {"ml": "N/A", "total": "N/A", "book": "N/A"})
+        game_key_odds = f"{home}_{away}"
+        if game_key_odds in odds_data:
+            line = odds_data[game_key_odds].get('total', 'N/A')
+            ml = odds_data[game_key_odds].get('ml', 'N/A')
+            book = odds_data[game_key_odds].get('book', 'Unknown')
+        else:
+            line, ml, book = "N/A", "N/A", "N/A"
         
-        alert = "None"
-        if temp_val and game_odds['total'] != "N/A":
-            if temp_val > 85 and float(game_odds['total']) <= 8.5:
-                alert = "🔥 OVER (Heat)"
-            elif wind_val and wind_val > 12:
-                alert = "💨 WIND ALERT"
+        alert = ""
+        if temp != "N/A" and float(temp) > 85: alert = "🔥 OVER (Heat)"
+        elif wind != "N/A" and float(wind) > 12: alert = "💨 OVER (Wind)"
 
-        final_data.append([
-            game_time_str, home_team, away_team, row['home_pitcher'], row['away_pitcher'],
-            game_odds.get('book', 'N/A'), # New Bookmaker column
-            game_odds['ml'], game_odds['total'], w_txt, wind_txt, hum_txt, alert
-        ])
+        # Prepare the row data
+        row_data = [today, home, away, hp, ap, book, ml, line, temp, wind, hum, alert, "", ""]
+        
+        # --- UPSERT EXECUTION ---
+        game_key_sheet = f"{today}_{home}_{away}"
+        
+        if game_key_sheet in row_map:
+            # Game exists! Update columns A through L (Leaving Actual/Result alone)
+            row_num = row_map[game_key_sheet]
+            # gspread format: sheet.update(range_name, [[values]])
+            sheet.update(range_name=f"A{row_num}:L{row_num}", values=[row_data[:12]])
+            print(f"🔄 Updated existing game: {away} @ {home}")
+        else:
+            # Game is new! Add to our append list
+            games_to_append.append(row_data)
+            print(f"➕ New game found: {away} @ {home}")
 
-    sheet.update(values=[headers] + final_data, range_name='A1')
-    print(f"Success! {len(final_data)} games pushed with Bookmaker info.")
+    if games_to_append:
+        sheet.append_rows(games_to_append, value_input_option="USER_ENTERED")
+        print(f"Appended {len(games_to_append)} new games to Master.")
+    else:
+        print("No new games to append. All existing games updated.")
 
 if __name__ == "__main__":
     run_scraper()
