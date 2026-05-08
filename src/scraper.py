@@ -7,9 +7,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import pytz
 
+# Import your custom utility files
 from odds_utils import get_mlb_odds
 from weather_utils import get_stadium_weather
 
+# Load local environment variables (does nothing if running in GitHub Actions)
 load_dotenv(override=True)
 
 def get_google_sheet_client():
@@ -20,23 +22,33 @@ def get_google_sheet_client():
     return gspread.authorize(creds)
 
 def check_headers(sheet):
+    """Ensures the Master sheet has headers and formatting if empty."""
     first_row = sheet.row_values(1)
+    
+    # Updated to 15 columns (Added 'Wind Dir')
     headers = [
         "Date/Time (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", 
-        "Bookmaker", "ML Odds", "O/U Total", "Temp", "Wind", 
+        "Bookmaker", "ML Odds", "O/U Total", "Temp", "Wind", "Wind Dir", 
         "Humidity", "Value Alert", "Actual Total", "Result"
     ]
+    
     if not first_row or first_row[0] == "":
         print("Headers missing. Rebuilding...")
         sheet.insert_row(headers, 1)
-        sheet.format("A1:N1", {"textFormat": {"bold": True}})
+        # Bold headers A through O
+        sheet.format("A1:O1", {"textFormat": {"bold": True}})
         sheet.update_title("Master")
+        try:
+            sheet.freeze(rows=1)
+        except:
+            pass
 
 def run_scraper():
-    print("--- Starting MLB Scrape with Upsert Logic ---")
+    print("--- Starting MLB Scrape with Upsert & Directional Wind ---")
     
     client = get_google_sheet_client()
     sheet = client.open("mlb-betting-app").worksheet("Master")
+    
     check_headers(sheet)
     
     today = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
@@ -48,14 +60,12 @@ def run_scraper():
     games = requests.get(schedule_url).json().get('dates', [{}])[0].get('games', [])
 
     # --- UPSERT LOGIC SETUP ---
-    # 1. Get all current rows to map existing games
     existing_rows = sheet.get_all_values()
     row_map = {}
     
-    # Start loop at 1 to skip headers. Add 1 to index because Sheets are 1-indexed.
+    # Map out the rows that already exist today
     for i, row in enumerate(existing_rows):
         if i == 0: continue 
-        # Create a unique key: Date_Home_Away
         if len(row) >= 3:
             key = f"{row[0]}_{row[1]}_{row[2]}"
             row_map[key] = i + 1 
@@ -65,21 +75,22 @@ def run_scraper():
     for game in games:
         home = game['teams']['home']['team']['name']
         away = game['teams']['away']['team']['name']
-        
-  # 1. Grab the official game time from the MLB API
         game_time = game.get('gameDate', 'N/A')
         
         hp = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBD')
         ap = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBD')
         
+        # 1. Weather Hook (Open-Meteo with game time and wind direction)
         weather = get_stadium_weather(home, game_time)
         if weather:
             temp = weather['temp']
             wind = weather['wind_speed']
+            wind_dir = weather['wind_dir']
             hum = weather['humidity']
         else:
-            temp, wind, hum = "N/A", "N/A", "N/A"
+            temp, wind, wind_dir, hum = "N/A", "N/A", "N/A", "N/A"
 
+        # 2. Odds Hook (DraftKings filtered)
         game_key_odds = f"{home}_{away}"
         if game_key_odds in odds_data:
             line = odds_data[game_key_odds].get('total', 'N/A')
@@ -88,24 +99,27 @@ def run_scraper():
         else:
             line, ml, book = "N/A", "N/A", "N/A"
         
+        # 3. Smart Alert Logic
         alert = ""
-        if temp != "N/A" and float(temp) > 85: alert = "🔥 OVER (Heat)"
-        elif wind != "N/A" and float(wind) > 12: alert = "💨 OVER (Wind)"
+        if temp != "N/A" and float(temp) > 85: 
+            alert = "🔥 OVER (Heat)"
+        if wind != "N/A" and float(wind) > 12: 
+            alert = f"💨 WINDY ({wind_dir})"
 
-        # Prepare the row data
-        row_data = [today, home, away, hp, ap, book, ml, line, temp, wind, hum, alert, "", ""]
+        # 4. Prepare row data (15 columns to match the new headers)
+        row_data = [today, home, away, hp, ap, book, ml, line, temp, wind, wind_dir, hum, alert, "", ""]
         
         # --- UPSERT EXECUTION ---
         game_key_sheet = f"{today}_{home}_{away}"
         
         if game_key_sheet in row_map:
-            # Game exists! Update columns A through L (Leaving Actual/Result alone)
+            # Game exists! Update columns A through M (13 columns)
+            # This leaves Columns N (Actual) and O (Result) untouched if they have data
             row_num = row_map[game_key_sheet]
-            # gspread format: sheet.update(range_name, [[values]])
-            sheet.update(range_name=f"A{row_num}:L{row_num}", values=[row_data[:12]])
+            sheet.update(range_name=f"A{row_num}:M{row_num}", values=[row_data[:13]])
             print(f"🔄 Updated existing game: {away} @ {home}")
         else:
-            # Game is new! Add to our append list
+            # Game is new!
             games_to_append.append(row_data)
             print(f"➕ New game found: {away} @ {home}")
 
