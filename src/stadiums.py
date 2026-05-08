@@ -18,7 +18,8 @@ STADIUM_COORDS = {
     "Minnesota Twins": {"lat": 44.981, "lon": -93.277},
     "New York Mets": {"lat": 40.757, "lon": -73.846},
     "New York Yankees": {"lat": 40.830, "lon": -73.926},
-    "Oakland Athletics": {"lat": 38.583, "lon": -121.516}, # Sutter Health Park (2026)
+    "Oakland Athletics": {"lat": 37.7516, "lon": -121.516},
+    "Athletics": {"lat": 37.7516, "lon": -121.516},
     "Philadelphia Phillies": {"lat": 39.906, "lon": -75.166},
     "Pittsburgh Pirates": {"lat": 40.447, "lon": -80.006},
     "San Diego Padres": {"lat": 32.708, "lon": -117.157},

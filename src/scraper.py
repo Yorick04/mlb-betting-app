@@ -1,115 +1,107 @@
 import os
 import json
-import gspread
-import requests
 import pandas as pd
-from datetime import datetime
-from dotenv import load_dotenv
+import requests
+import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from dotenv import load_dotenv
+from datetime import datetime
+import pytz
 
-# --- The Permanent Fix for Module Pathing ---
-try:
-    # This works when running from the project root (like GitHub Actions)
-    from src.stadiums import STADIUM_COORDS
-    from src.odds_utils import get_mlb_odds
-except ModuleNotFoundError:
-    # This works when running directly from the /src folder (like your local PC)
-    from stadiums import STADIUM_COORDS
-    from odds_utils import get_mlb_odds
+# Local Imports
+from odds_utils import get_mlb_odds
+from weather_utils import get_stadium_weather
 
-load_dotenv()
+# Load environment variables
+load_dotenv(override=True)
 
 def get_google_sheet_client():
-    """Authenticates with Google Sheets using local file or GitHub Secret."""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    
-    if "GOOGLE_SHEETS_JSON" in os.environ:
-        creds_info = json.loads(os.environ["GOOGLE_SHEETS_JSON"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
-    else:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        parent_dir = os.path.dirname(current_dir)
-        key_path = os.path.join(parent_dir, 'service_account_key.json')
-        creds = ServiceAccountCredentials.from_json_keyfile_name(key_path, scope)
-        
-    return gspread.authorize(creds)
+    env_json = os.getenv("GOOGLE_SHEETS_JSON")
+    if env_json:
+        creds_info = json.loads(env_json)
+        return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
+    return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name('service_account_key.json', scope))
 
-def get_weather(team_name):
-    """Fetches real-time weather from OpenWeather for the home stadium."""
-    api_key = os.getenv("OPENWEATHER_API_KEY")
-    coords = STADIUM_COORDS.get(team_name)
-    
-    if not coords or not api_key:
-        return {"temp": "N/A", "wind": "N/A", "humidity": "N/A"}
-    
-    url = f"https://api.openweathermap.org/data/2.5/weather?lat={coords['lat']}&lon={coords['lon']}&appid={api_key}&units=imperial"
-    
+def get_mlb_daily_schedule(date_str):
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={date_str}&hydrate=probablePitcher"
     try:
-        response = requests.get(url)
-        data = response.json()
-        return {
-            "temp": f"{round(data['main']['temp'])}°F",
-            "wind": f"{data['wind']['speed']} MPH @ {data['wind'].get('deg', 0)}°",
-            "humidity": f"{data['main']['humidity']}%"
-        }
-    except Exception:
-        return {"temp": "Error", "wind": "Error", "humidity": "Error"}
-
-def run_daily_update():
-    """Main execution: Scrapes MLB slate, weather, and odds, then updates Google Sheets."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    print(f"--- Fetching Slate, Weather, & Odds for {today} ---")
-    
-    # 1. Fetch Betting Odds
-    all_odds = get_mlb_odds()
-    
-    # 2. Fetch MLB Schedule from StatsAPI
-    mlb_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&hydrate=probablePitcher"
-    try:
-        data = requests.get(mlb_url).json()
+        response = requests.get(url).json()
+        games = []
+        if "dates" in response and response["dates"]:
+            for game in response["dates"][0]["games"]:
+                home_p = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBA')
+                away_p = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBA')
+                games.append({
+                    'game_utc': game['gameDate'],
+                    'home_name': game['teams']['home']['team']['name'],
+                    'away_name': game['teams']['away']['team']['name'],
+                    'home_pitcher': home_p,
+                    'away_pitcher': away_p
+                })
+        return pd.DataFrame(games)
     except Exception as e:
-        print(f"MLB API Error: {e}")
+        print(f"Error fetching MLB schedule: {e}")
+        return pd.DataFrame()
+
+def run_scraper():
+    today = datetime.now().strftime('%Y-%m-%d')
+    print(f"--- Starting Pipeline for {today} ---")
+
+    schedule = get_mlb_daily_schedule(today)
+    if schedule.empty:
+        print("No games scheduled.")
         return
 
-    games = []
-    if 'dates' in data and len(data['dates']) > 0:
-        for game in data['dates'][0]['games']:
-            home_team = game['teams']['home']['team']['name']
-            weather = get_weather(home_team)
-            # Match odds to the home team
-            odds = all_odds.get(home_team, {"ML": "N/A", "OU": "N/A"})
-            
-            games.append({
-                'Home': home_team,
-                'Away': game['teams']['away']['team']['name'],
-                'Home Pitcher': game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBA'),
-                'Away Pitcher': game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBA'),
-                'ML Odds': odds["ML"],
-                'O/U Total': odds["OU"],
-                'Temp': weather['temp'],
-                'Wind': weather['wind'],
-                'Humidity': weather['humidity']
-            })
-
-    if not games:
-        print("No games scheduled for today.")
-        return
-
-    # 3. Process and Upload to Google Sheets
+    odds_data = get_mlb_odds()
+    
     try:
-        df = pd.DataFrame(games)
         client = get_google_sheet_client()
-        spreadsheet = client.open("mlb-betting-app")
-        worksheet = spreadsheet.get_worksheet(0)
-
-        worksheet.clear()
-        # Using named arguments to avoid future deprecation warnings
-        data_to_upload = [df.columns.values.tolist()] + df.values.tolist()
-        worksheet.update(values=data_to_upload, range_name='A1')
-        
-        print(f"Success! {len(df)} games with weather and odds pushed to 'mlb-betting-app'.")
+        sheet = client.open("mlb-betting-app").sheet1
+        sheet.clear()
     except Exception as e:
-        print(f"Update Error: {e}")
+        print(f"Sheets Error: {e}")
+        return
+
+    final_data = []
+    # Added "Bookmaker" to the headers
+    headers = ["Date/Time (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", "Bookmaker", "ML Odds", "O/U Total", "Temp", "Wind", "Humidity", "Value Alert"]
+
+    for _, row in schedule.iterrows():
+        # Time conversion
+        utc_dt = datetime.strptime(row['game_utc'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
+        local_dt = utc_dt.astimezone(pytz.timezone("US/Central"))
+        game_time_str = local_dt.strftime("%m/%d %I:%M %p")
+
+        home_team = row['home_name']
+        away_team = row['away_name']
+        
+        weather = get_stadium_weather(home_team)
+        if weather:
+            temp_val, wind_val = weather["temp"], weather["wind_speed"]
+            w_txt, wind_txt, hum_txt = f"{temp_val}°F", f"{wind_val} MPH @ {weather['wind_deg']}°", f"{weather['humidity']}%"
+        else:
+            w_txt, wind_txt, hum_txt, temp_val, wind_val = "N/A", "N/A", "N/A", None, None
+
+        # Fetch odds and book name
+        lookup_key = f"{home_team}_{away_team}"
+        game_odds = odds_data.get(lookup_key, {"ml": "N/A", "total": "N/A", "book": "N/A"})
+        
+        alert = "None"
+        if temp_val and game_odds['total'] != "N/A":
+            if temp_val > 85 and float(game_odds['total']) <= 8.5:
+                alert = "🔥 OVER (Heat)"
+            elif wind_val and wind_val > 12:
+                alert = "💨 WIND ALERT"
+
+        final_data.append([
+            game_time_str, home_team, away_team, row['home_pitcher'], row['away_pitcher'],
+            game_odds.get('book', 'N/A'), # New Bookmaker column
+            game_odds['ml'], game_odds['total'], w_txt, wind_txt, hum_txt, alert
+        ])
+
+    sheet.update(values=[headers] + final_data, range_name='A1')
+    print(f"Success! {len(final_data)} games pushed with Bookmaker info.")
 
 if __name__ == "__main__":
-    run_daily_update()
+    run_scraper()
