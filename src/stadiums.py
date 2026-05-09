@@ -1,3 +1,32 @@
+# Orientation: Degrees from Home Plate to Center Field (0=N, 90=E, 180=S, 270=W)
+STADIUM_ORIENTATION = {
+    "Arizona Diamondbacks": 0, "Atlanta Braves": 0, "Baltimore Orioles": 45,
+    "Boston Red Sox": 45, "Chicago Cubs": 45, "Chicago White Sox": 45,
+    "Cincinnati Reds": 45, "Cleveland Guardians": 45, "Colorado Rockies": 0,
+    "Detroit Tigers": 45, "Houston Astros": 45, "Kansas City Royals": 45,
+    "Los Angeles Angels": 45, "Los Angeles Dodgers": 45, "Miami Marlins": 90,
+    "Milwaukee Brewers": 45, "Minnesota Twins": 45, "New York Mets": 45,
+    "New York Yankees": 45, "Athletics": 45, "Philadelphia Phillies": 45,
+    "Pittsburgh Pirates": 45, "San Diego Padres": 45, "San Francisco Giants": 68,
+    "Seattle Mariners": 45, "St. Louis Cardinals": 45, "Tampa Bay Rays": 0,
+    "Texas Rangers": 45, "Toronto Blue Jays": 45, "Washington Nationals": 45
+}
+
+# 2026 Statcast Run Factors (100 = League Average)
+# Athletics Factor 137 accounts for Sutter Health Park (Sacramento)
+PARK_FACTORS = {
+    "Arizona Diamondbacks": 106, "Atlanta Braves": 99, "Baltimore Orioles": 104,
+    "Boston Red Sox": 102, "Chicago Cubs": 99, "Chicago White Sox": 98,
+    "Cincinnati Reds": 103, "Cleveland Guardians": 97, "Colorado Rockies": 117,
+    "Detroit Tigers": 101, "Houston Astros": 96, "Kansas City Royals": 102,
+    "Los Angeles Angels": 97, "Los Angeles Dodgers": 102, "Miami Marlins": 93,
+    "Milwaukee Brewers": 101, "Minnesota Twins": 104, "New York Mets": 95,
+    "New York Yankees": 102, "Athletics": 137, "Philadelphia Phillies": 103,
+    "Pittsburgh Pirates": 97, "San Diego Padres": 90, "San Francisco Giants": 95,
+    "Seattle Mariners": 82, "St. Louis Cardinals": 95, "Tampa Bay Rays": 100,
+    "Texas Rangers": 101, "Toronto Blue Jays": 100, "Washington Nationals": 94
+}
+
 STADIUM_COORDS = {
     "Arizona Diamondbacks": {"lat": 33.445, "lon": -112.067},
     "Atlanta Braves": {"lat": 33.891, "lon": -84.468},
@@ -18,8 +47,7 @@ STADIUM_COORDS = {
     "Minnesota Twins": {"lat": 44.981, "lon": -93.277},
     "New York Mets": {"lat": 40.757, "lon": -73.846},
     "New York Yankees": {"lat": 40.830, "lon": -73.926},
-    "Oakland Athletics": {"lat": 37.7516, "lon": -121.516},
-    "Athletics": {"lat": 37.7516, "lon": -121.516},
+    "Athletics": {"lat": 38.581, "lon": -121.504},
     "Philadelphia Phillies": {"lat": 39.906, "lon": -75.166},
     "Pittsburgh Pirates": {"lat": 40.447, "lon": -80.006},
     "San Diego Padres": {"lat": 32.708, "lon": -117.157},
