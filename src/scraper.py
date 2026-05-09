@@ -6,7 +6,9 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import pytz
+import time
 
+# Custom utilities
 from odds_utils import get_mlb_odds
 from weather_utils import get_stadium_weather
 
@@ -15,6 +17,8 @@ load_dotenv(override=True)
 def get_google_sheet_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     env_json = os.getenv("GOOGLE_SHEETS_JSON")
+    if not env_json:
+        raise ValueError("GOOGLE_SHEETS_JSON not found.")
     creds_info = json.loads(env_json)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
     return gspread.authorize(creds)
@@ -30,51 +34,44 @@ def check_headers(sheet):
         print("Headers missing. Rebuilding...", flush=True)
         sheet.insert_row(headers, 1)
         sheet.format("A1:O1", {"textFormat": {"bold": True}})
-        sheet.update_title("Master")
         try:
             sheet.freeze(rows=1)
         except:
             pass
 
 def run_scraper():
-    # flush=True forces GitHub to show us the text IMMEDIATELY
-    print("--- Starting MLB Scrape with Upsert & Directional Wind ---", flush=True)
+    print("--- Starting MLB Scraper (Local Anaconda) ---", flush=True)
     
-    client = get_google_sheet_client()
-    sheet = client.open("mlb-betting-app").worksheet("Master")
+    try:
+        client = get_google_sheet_client()
+        sheet = client.open("mlb-betting-app").worksheet("Master")
+    except Exception as e:
+        print(f"❌ Failed to connect to Google Sheets: {e}")
+        return
     
     check_headers(sheet)
     
     today = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
 
-    print("Fetching odds data...", flush=True)
+    # 1. Fetch Odds
     odds_data = get_mlb_odds()
     
+    # 2. Fetch MLB Schedule
     print("Fetching MLB schedule...", flush=True)
     schedule_url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}&hydrate=probablePitcher"
     
     try:
-        # Added a 10 second timeout so we never freeze again
-        response = requests.get(schedule_url, timeout=10).json()
+        response = requests.get(schedule_url, timeout=15).json()
         dates = response.get('dates', [])
         games = dates[0].get('games', []) if dates else []
     except Exception as e:
-        print(f"Failed to fetch MLB schedule: {e}", flush=True)
-        games = []
-
-    if not games:
-        print("No games found for today or MLB API failed.", flush=True)
+        print(f"❌ Failed to fetch MLB schedule: {e}", flush=True)
         return
 
-    print(f"Found {len(games)} games. Checking existing rows in sheet...", flush=True)
-    existing_rows = sheet.get_all_values()
-    row_map = {}
+    print(f"Found {len(games)} games. Processing logic...", flush=True)
     
-    for i, row in enumerate(existing_rows):
-        if i == 0: continue 
-        if len(row) >= 3:
-            key = f"{row[0]}_{row[1]}_{row[2]}"
-            row_map[key] = i + 1 
+    existing_rows = sheet.get_all_values()
+    row_map = {f"{r[0]}_{r[1]}_{r[2]}": i + 1 for i, r in enumerate(existing_rows) if len(r) >= 3}
 
     games_to_append = []
 
@@ -83,23 +80,35 @@ def run_scraper():
         away = game['teams']['away']['team']['name']
         game_time = game.get('gameDate', 'N/A')
         
-        print(f"Processing: {away} @ {home}...", flush=True)
-        
         hp = game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBD')
         ap = game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBD')
         
+        print(f"-> Processing: {away} @ {home}", flush=True)
+        
+        # Weather
         weather = get_stadium_weather(home, game_time)
         if weather:
             temp, wind, wind_dir, hum = weather['temp'], weather['wind_speed'], weather['wind_dir'], weather['humidity']
         else:
             temp, wind, wind_dir, hum = "N/A", "N/A", "N/A", "N/A"
 
-        game_key_odds = f"{home}_{away}"
-        if game_key_odds in odds_data:
-            line, ml, book = odds_data[game_key_odds].get('total', 'N/A'), odds_data[game_key_odds].get('ml', 'N/A'), odds_data[game_key_odds].get('book', 'Unknown')
-        else:
-            line, ml, book = "N/A", "N/A", "N/A"
+        # Odds Matching (Fuzzy)
+        line, ml, book = "N/A", "N/A", "N/A"
+        matched_key = None
         
+        for key in odds_data.keys():
+            if (home in key or home.split()[-1] in key) and (away in key or away.split()[-1] in key):
+                matched_key = key
+                break
+        
+        if matched_key:
+            line = odds_data[matched_key].get('total', 'N/A')
+            ml = odds_data[matched_key].get('ml', 'N/A')
+            book = odds_data[matched_key].get('book', 'DraftKings')
+        else:
+            print(f"   ⚠️ No Odds match found for {away} @ {home}", flush=True)
+
+        # Alert Logic
         alert = ""
         if temp != "N/A" and float(temp) > 85: alert = "🔥 OVER (Heat)"
         if wind != "N/A" and float(wind) > 12: alert = f"💨 WINDY ({wind_dir})"
@@ -113,12 +122,13 @@ def run_scraper():
         else:
             games_to_append.append(row_data)
 
+        time.sleep(2)
+
     if games_to_append:
-        print(f"Appending {len(games_to_append)} new games to Sheet...", flush=True)
         sheet.append_rows(games_to_append, value_input_option="USER_ENTERED")
-        print("Append complete!", flush=True)
+        print(f"✅ Success: Appended {len(games_to_append)} new games.", flush=True)
     else:
-        print("No new games to append. All existing games updated.", flush=True)
+        print("✅ Success: Master Sheet updated.", flush=True)
 
 if __name__ == "__main__":
     run_scraper()
