@@ -1,10 +1,12 @@
-name: Daily MLB Scraper
+name: MLB Data Daily Scraper
 
 on:
+  push:
+    branches: [ main ]
   schedule:
-    # Runs at 14:00 UTC (9:00 AM Central Time) every day
-    - cron: '0 14 * * *'
-  workflow_dispatch: # Allows you to trigger it manually for testing
+    # Runs at 00:00, 06:00, 12:00, and 18:00 UTC
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,26 +14,20 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests gspread oauth2client python-dotenv pytz
-
-      - name: Run Audit
-        env:
-          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-        run: python src/results_tracker.py
+          pip install requests python-dotenv gspread oauth2client pytz
 
       - name: Run Scraper
         env:
-          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: python src/scraper.py
