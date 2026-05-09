@@ -13,7 +13,7 @@ def get_mlb_odds():
     url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey={api_key}&regions=us&markets=h2h,totals&bookmakers=draftkings&oddsFormat=american"
     
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         odds_dict = {}
 

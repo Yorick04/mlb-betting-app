@@ -25,7 +25,7 @@ def get_stadium_weather(team_name, game_time_utc):
     )
     
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
         target_hour = game_time_utc[:14] + "00" 
