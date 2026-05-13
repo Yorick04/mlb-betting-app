@@ -1,4 +1,5 @@
 import requests
+from datetime import datetime
 from stadiums import STADIUM_COORDS
 
 # List of stadiums that are domes or have retractable roofs
@@ -22,9 +23,23 @@ def get_stadium_weather(team_name, game_time_utc, roof_status="Open"):
     
     try:
         response = requests.get(url, timeout=10).json()
-        target_hour = game_time_utc[:14] + "00"
         times = response.get('hourly', {}).get('time', [])
-        idx = times.index(target_hour) if target_hour in times else 0
+        
+        # Parse the MLB game time (Format: 2026-05-12T19:05:00Z)
+        game_dt = datetime.strptime(game_time_utc, "%Y-%m-%dT%H:%M:%SZ")
+        
+        # Find the closest hourly index in the Open-Meteo data
+        best_idx = 0
+        min_diff = float('inf')
+        for i, t_str in enumerate(times):
+            # Open-Meteo time format: 2026-05-12T19:00
+            t_dt = datetime.strptime(t_str, "%Y-%m-%dT%H:%M")
+            diff = abs((game_dt - t_dt).total_seconds())
+            if diff < min_diff:
+                min_diff = diff
+                best_idx = i
+        
+        idx = best_idx
         raw_deg = response['hourly']['wind_direction_10m'][idx]
         
         return {
@@ -34,4 +49,6 @@ def get_stadium_weather(team_name, game_time_utc, roof_status="Open"):
             "wind_dir": get_compass_dir(raw_deg),
             "wind_deg": raw_deg
         }
-    except: return None
+    except Exception as e:
+        print(f"Error fetching weather for {team_name}: {e}")
+        return None

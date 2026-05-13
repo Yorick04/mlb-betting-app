@@ -26,8 +26,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests python-dotenv gspread oauth2client pytz
 
-      - name: Run Scraper
+      - name: Run Scraper and Results Tracker
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
-        run: python src/scraper.py
+        run: |
+          python src/scraper.py
+          python src/results_tracker.py
