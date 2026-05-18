@@ -1,5 +1,10 @@
 import requests
+from functools import lru_cache
 
+# 2026 League Average FIP Constant (Can be updated dynamically mid-season)
+CURRENT_FIP_CONSTANT = 3.20
+
+@lru_cache(maxsize=128)
 def get_pitcher_metrics(player_id):
     """
     Fetches 2026 season stats and calculates a FIP-based Pitcher Score.
@@ -52,8 +57,7 @@ def get_pitcher_metrics(player_id):
         
         # 2. Calculate FIP (Fielding Independent Pitching)
         # FIP Formula: ((13*HR) + (3*(BB+HBP)) - (2*K)) / IP + FIP_Constant
-        # Using 3.2 as the normalized 2026 constant to align with league ERA baseline
-        fip = ((13 * hr) + (3 * (bb + hbp)) - (2 * k)) / ip + 3.2
+        fip = ((13 * hr) + (3 * (bb + hbp)) - (2 * k)) / ip + CURRENT_FIP_CONSTANT
         
         # 3. Calculate a "Pitcher Score" (Weighted blend: 40% ERA / 60% FIP)
         pitcher_score = round((float(era) * 0.4) + (fip * 0.6), 2)

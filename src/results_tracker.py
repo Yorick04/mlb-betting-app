@@ -1,6 +1,16 @@
-import os, gspread, requests, json, time, pytz
+import os, requests, pytz, time, json, gspread
 from datetime import datetime
-from scraper import get_google_sheet_client
+from dotenv import load_dotenv
+from oauth2client.service_account import ServiceAccountCredentials
+
+load_dotenv(override=True)
+session = requests.Session()
+
+def get_google_sheet_client():
+    """Standalone client to prevent circular imports with scraper.py"""
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds_info = json.loads(os.getenv("GOOGLE_SHEETS_JSON"))
+    return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
 
 def update_master_results():
     print("--- Auditing Master Sheet (Live Catch-Up) ---")
@@ -8,28 +18,23 @@ def update_master_results():
     sheet = client.open("mlb-betting-app").worksheet("Master")
     all_rows = sheet.get_all_records()
     
-    # Tracking US/Central to match local Huntsville execution time
     today_str = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
-    
-    # 1. Gather all dates requiring a grade
     dates_to_check = set()
+    
     for row in all_rows:
-        row_date = str(row.get('Date/Time (CT)', ''))
-        actual_val = str(row.get('Actual Total', '')).strip()
-        
-        if row_date and row_date <= today_str and actual_val == "":
+        row_date = str(row.get('Date (CT)', ''))
+        if row_date and row_date <= today_str and str(row.get('Result', '')).strip() == "":
             dates_to_check.add(row_date)
 
     if not dates_to_check:
         print("No pending games to grade.")
         return
 
-    # 2. Bulk fetch scoreboard states from the MLB API
     scores = {}
     for d in dates_to_check:
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={d}"
         try:
-            resp = requests.get(url, timeout=15).json()
+            resp = session.get(url, timeout=15).json()
             for date_obj in resp.get('dates', []):
                 for g in date_obj.get('games', []):
                     status = g['status']['abstractGameState']
@@ -38,48 +43,78 @@ def update_master_results():
                     
                     if status == 'Final':
                         scores[f"{d}_{matchup}"] = {
+                            "home_score": g['teams']['home'].get('score', 0),
+                            "away_score": g['teams']['away'].get('score', 0),
                             "total": g['teams']['home'].get('score', 0) + g['teams']['away'].get('score', 0),
                             "status": "FINAL"
                         }
-                    elif detail == "Postponed" or detail == "Cancelled":
-                        scores[f"{d}_{matchup}"] = {"total": 0, "status": "PPD"}
-        except: 
-            continue
+                    elif detail in ["Postponed", "Cancelled"]:
+                        scores[f"{d}_{matchup}"] = {"status": "PPD"}
+        except: continue
 
-    # 3. Grade the sheet grid
+    cells_to_update = []
+
     for i, row in enumerate(all_rows, start=2):
-        row_date = str(row.get('Date/Time (CT)', ''))
+        row_date = str(row.get('Date (CT)', ''))
         matchup = f"{row.get('Away')}@{row.get('Home')}"
         score_key = f"{row_date}_{matchup}"
-        actual_val = str(row.get('Actual Total', '')).strip()
         
-        if actual_val == "" and score_key in scores:
+        if str(row.get('Result', '')).strip() == "" and score_key in scores:
             game_data = scores[score_key]
-            actual = game_data["total"]
-            status = game_data["status"]
             
-            if status == "PPD":
-                res = "POSTPONED"
-            else:
-                pick = str(row.get('Model Pick', ''))
-                line_val = row.get('O/U Total')
-                res = "PUSH"
+            if game_data["status"] == "PPD":
+                cells_to_update.append(gspread.Cell(row=i, col=27, value="PPD"))
+                cells_to_update.append(gspread.Cell(row=i, col=28, value="POSTPONED"))
+                continue
                 
-                if "OVER" in pick or "UNDER" in pick:
-                    try:
-                        line = float(line_val)
-                        if actual == line: res = "PUSH"
-                        elif "OVER" in pick: res = "WIN" if actual > line else "LOSS"
-                        elif "UNDER" in pick: res = "WIN" if actual < line else "LOSS"
-                    except: res = "ERROR"
-                else:
-                    res = "PASS"
+            actual_home, actual_away, actual_total = game_data["home_score"], game_data["away_score"], game_data["total"]
+            formatted_actual = f"H: {actual_home} | A: {actual_away} | T: {actual_total}"
+            
+            t_pick = str(row.get('Total Pick', 'PASS')).upper()
+            m_pick = str(row.get('ML Pick', 'PASS')).upper()
+            s_pick = str(row.get('Spread Pick', 'PASS')).upper()
+            
+            results_str = []
+            
+            # 1. Total Grade
+            if "OVER" in t_pick or "UNDER" in t_pick:
+                try:
+                    line = float(row.get('O/U Total'))
+                    if actual_total == line: results_str.append("T: PUSH")
+                    elif "OVER" in t_pick: results_str.append("T: WIN" if actual_total > line else "T: LOSS")
+                    elif "UNDER" in t_pick: results_str.append("T: WIN" if actual_total < line else "T: LOSS")
+                except: pass
 
-            # Cleanly drop stats into columns 23 & 24 at the end of the new 24-column sheet
-            sheet.update_cell(i, 23, actual)
-            sheet.update_cell(i, 24, res)
-            print(f"Graded Row {i}: {matchup} -> {actual} ({res})")
-            time.sleep(1)
+            # 2. ML Grade
+            if m_pick != "PASS":
+                if "HOME" in m_pick: results_str.append("ML: WIN" if actual_home > actual_away else "ML: LOSS")
+                elif "AWAY" in m_pick: results_str.append("ML: WIN" if actual_away > actual_home else "ML: LOSS")
+
+            # 3. Spread Grade (Supports Home and Away grading securely)
+            if s_pick != "PASS":
+                try:
+                    # Extracts the pure number out of strings like "HOME -1.5 (-110) [FanDuel] | ★★"
+                    spread_val = float(s_pick.split()[1])
+                    if "HOME" in s_pick:
+                        adj_home = actual_home + spread_val
+                        if adj_home == actual_away: results_str.append("RL: PUSH")
+                        else: results_str.append("RL: WIN" if adj_home > actual_away else "RL: LOSS")
+                    elif "AWAY" in s_pick:
+                        adj_away = actual_away + spread_val
+                        if adj_away == actual_home: results_str.append("RL: PUSH")
+                        else: results_str.append("RL: WIN" if adj_away > actual_home else "RL: LOSS")
+                except: pass
+
+            final_res = " | ".join(results_str) if results_str else "NO ACTION"
+
+            # Write out to Cols 27 and 28 via batch update
+            cells_to_update.append(gspread.Cell(row=i, col=27, value=formatted_actual))
+            cells_to_update.append(gspread.Cell(row=i, col=28, value=final_res))
+            print(f"Graded Row {i}: {matchup} -> {final_res}")
+
+    if cells_to_update:
+        sheet.update_cells(cells_to_update)
+        print(f"Batch updated {len(cells_to_update)} cells successfully.")
 
 if __name__ == "__main__":
     update_master_results()

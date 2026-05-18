@@ -1,49 +1,49 @@
-import os, requests, json, gspread, time, pytz
+import os, json, gspread, time, pytz, math
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
 
-# Your utility imports
 from odds_utils import get_mlb_odds
 from weather_utils import get_stadium_weather
 from stadiums import STADIUM_COORDS, PARK_FACTORS, STADIUM_ORIENTATION 
 from umpire_utils import get_umpire_multiplier
 from pitcher_utils import get_pitcher_metrics
 from bullpen_utils import get_bullpen_metrics, get_bullpen_fatigue
+from hitter_utils import get_lineup_multiplier
 
 load_dotenv(override=True)
+session = requests.Session()
 
 def get_google_sheet_client():
+    """Standalone client to prevent circular imports"""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    env_json = os.getenv("GOOGLE_SHEETS_JSON")
-    creds_info = json.loads(env_json)
+    creds_info = json.loads(os.getenv("GOOGLE_SHEETS_JSON"))
     return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
 
 def check_headers(sheet):
-    # The Definitive 24-Column Layout
     headers = [
-        "Date/Time (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", 
-        "Bookmaker", "ML Odds", "O/U Total", "Projected Total", 
+        "Date (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", 
+        "H ML", "A ML", "Spread", "O/U Total", 
+        "Exp Home Runs", "Exp Away Runs", "Proj Total",
         "Home SP Score", "Away SP Score", "Home BP Score", "Away BP Score", 
-        "Home BP Fatigue", "Away BP Fatigue", "Temp", "Wind", "Wind Dir", 
-        "Humidity", "Value Alert", "Model Pick", "Confidence Score", 
-        "Actual Total", "Result"
+        "Home Fatigue", "Away Fatigue", "Temp", "Wind", "Wind Dir", "Alerts",
+        "Total Pick", "ML Pick", "Spread Pick", "Cumulative Stars", "Actual Score", "Result"
     ]
-    try:
-        first_row = sheet.row_values(1)
-    except:
-        first_row = []
+    try: first_row = sheet.row_values(1)
+    except: first_row = []
 
     if not first_row or len(first_row) != len(headers):
-        print("--- Rebuilding Sheet Headers to 24 Columns ---")
-        # Safety wipe out to column AD to clear out old orphan data
+        print("--- Expanding Sheet Headers to 28 Columns ---")
         sheet.update(values=[["" for _ in range(30)]], range_name='A1:AD1') 
-        
-        # Write clean headers
-        sheet.update(values=[headers], range_name='A1:X1')
-        sheet.format("A1:X1", {"textFormat": {"bold": True}})
-        try: sheet.freeze(rows=1)
-        except: pass
+        sheet.update(values=[headers], range_name='A1:AB1')
+        sheet.format("A1:AB1", {"textFormat": {"bold": True}})
+
+def implied_probability(american_odds):
+    if american_odds == "N/A": return 0
+    odds = float(american_odds)
+    return abs(odds) / (abs(odds) + 100) if odds < 0 else 100 / (odds + 100)
 
 def calculate_wind_impact(home_team, wind_deg, wind_speed):
     if wind_deg == "N/A" or home_team not in STADIUM_ORIENTATION: return "Neutral"
@@ -54,8 +54,149 @@ def calculate_wind_impact(home_team, wind_deg, wind_speed):
     if diff > 135 and wind_speed > 10: return "IN"
     return "CROSS"
 
+def process_single_game(game, odds_data, today):
+    home, away = game['teams']['home']['team']['name'], game['teams']['away']['team']['name']
+    h_id, a_id = game['teams']['home']['team']['id'], game['teams']['away']['team']['id']
+    
+    hp_data = game['teams']['home'].get('probablePitcher', {})
+    ap_data = game['teams']['away'].get('probablePitcher', {})
+    hp_name, hp_id = hp_data.get('fullName', 'TBD'), hp_data.get('id', None)
+    ap_name, ap_id = ap_data.get('fullName', 'TBD'), ap_data.get('id', None)
+    
+    ump = next((o['official']['fullName'] for o in game.get('officials', []) if o['officialType'] == 'Home Plate'), "Unknown")
+    roof = game.get('weather', {}).get('condition', 'Open')
+    weather = get_stadium_weather(home, game.get('gameDate'), roof)
+    temp, w_sp, w_dir, hum, w_deg = (weather['temp'], weather['wind_speed'], weather['wind_dir'], weather['humidity'], weather['wind_deg']) if weather else ("N/A", "N/A", "N/A", "N/A", "N/A")
+
+    matched_key = f"{today}_{home}_{away}"
+    odds = odds_data.get(matched_key, {})
+    
+    # Hardcoding to DraftKings
+    book_name = "DraftKings"
+    
+    line = odds.get('total', 'N/A')
+    ml_h = odds.get('ml_home', 'N/A')
+    ml_a = odds.get('ml_away', 'N/A')
+    rl_hp = odds.get('rl_home_point', 'N/A')
+    rl_hc = odds.get('rl_home_price', 'N/A')
+    
+    hp_m = get_pitcher_metrics(hp_id)
+    ap_m = get_pitcher_metrics(ap_id)
+    h_bp = get_bullpen_metrics(h_id)
+    a_bp = get_bullpen_metrics(a_id)
+    h_fatigue = get_bullpen_fatigue(h_id)
+    a_fatigue = get_bullpen_fatigue(a_id)
+    
+    # NEW: Hitter Utils - Calculate Offensive Threat Multiplier based on pitcher handedness
+    h_lineup_mult = get_lineup_multiplier(h_id, ap_id)
+    a_lineup_mult = get_lineup_multiplier(a_id, hp_id)
+    
+    # NEW: Apply the lineup multiplier to the expected base runs
+    home_base_runs = ((ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + a_fatigue) * h_lineup_mult
+    away_base_runs = ((hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + h_fatigue) * a_lineup_mult
+    
+    park_f = PARK_FACTORS.get(home, 100)
+    ump_m = get_umpire_multiplier(ump)
+    wind_impact = calculate_wind_impact(home, w_deg, w_sp)
+    
+    env_multiplier = (park_f / 100.0) * ump_m
+    if temp != "N/A":
+        t = float(temp)
+        if t > 85: env_multiplier += 0.05
+        elif t < 55: env_multiplier -= 0.05
+    if wind_impact == "OUT": env_multiplier += 0.08
+    elif wind_impact == "IN": env_multiplier -= 0.08
+
+    exp_home = round(home_base_runs * env_multiplier, 2)
+    exp_away = round(away_base_runs * env_multiplier, 2)
+    expected_total = round(exp_home + exp_away, 2)
+    
+    # ---- ISOLATED CONFIDENCE BETTING LOGIC ----
+    total_pick, ml_pick, spread_pick = "PASS", "PASS", "PASS"
+    total_stars = 0
+    
+    # 1. Totals (O/U)
+    if line != "N/A":
+        edge = abs(expected_total - float(line))
+        if edge >= 0.75:
+            stars = "★★★" if edge >= 2.0 else "★★" if edge >= 1.25 else "★"
+            total_stars += len(stars)
+            direction = "OVER" if expected_total > float(line) else "UNDER"
+            total_pick = f"{direction} {line} [{book_name}] | {stars}"
+
+    # 2. Moneyline Edge
+    if exp_home > 0 and exp_away > 0 and ml_h != "N/A" and ml_a != "N/A":
+        model_h_prob = (exp_home**1.83) / (exp_home**1.83 + exp_away**1.83)
+        book_h_prob, book_a_prob = implied_probability(ml_h), implied_probability(ml_a)
+
+        h_edge, a_edge = (model_h_prob - book_h_prob), ((1.0 - model_h_prob) - book_a_prob)
+
+        if book_h_prob > 0 and h_edge > 0.05:
+            stars = "★★★" if h_edge > 0.12 else "★★" if h_edge > 0.08 else "★"
+            total_stars += len(stars)
+            ml_pick = f"HOME {ml_h} [{book_name}] | {stars}"
+        elif book_a_prob > 0 and a_edge > 0.05:
+            stars = "★★★" if a_edge > 0.12 else "★★" if a_edge > 0.08 else "★"
+            total_stars += len(stars)
+            ml_pick = f"AWAY {ml_a} [{book_name}] | {stars}"
+
+    # 3. Spread (Run Line) Edge using Normal Approximation of Skellam Distribution
+    if rl_hp != "N/A" and odds.get('rl_away_point') != "N/A":
+        h_point, a_point = float(rl_hp), float(odds.get('rl_away_point'))
+        
+        mean_run_diff = exp_home - exp_away 
+        var_run_diff = exp_home + exp_away # Variance of Skellam is mu1 + mu2
+        
+        if var_run_diff > 0:
+            # z = (mean - target_margin) / std_dev
+            z_score_h = (mean_run_diff - (-h_point)) / math.sqrt(var_run_diff)
+            prob_h_cover = 0.5 * (1 + math.erf(z_score_h / math.sqrt(2)))
+            
+            z_score_a = (-mean_run_diff - (-a_point)) / math.sqrt(var_run_diff)
+            prob_a_cover = 0.5 * (1 + math.erf(z_score_a / math.sqrt(2)))
+        else:
+            prob_h_cover, prob_a_cover = 0, 0
+            
+        book_h_rl_prob = implied_probability(rl_hc)
+        book_a_rl_prob = implied_probability(odds.get('rl_away_price'))
+
+        h_edge = prob_h_cover - book_h_rl_prob
+        a_edge = prob_a_cover - book_a_rl_prob
+        
+        if book_h_rl_prob > 0 and h_edge > 0.05:
+            stars = "★★★" if h_edge >= 0.12 else "★★" if h_edge >= 0.08 else "★"
+            total_stars += len(stars)
+            sign = "+" if h_point > 0 else ""
+            spread_pick = f"HOME {sign}{h_point} ({rl_hc}) [{book_name}] | {stars}"
+        elif book_a_rl_prob > 0 and a_edge > 0.05:
+            stars = "★★★" if a_edge >= 0.12 else "★★" if a_edge >= 0.08 else "★"
+            total_stars += len(stars)
+            sign = "+" if a_point > 0 else ""
+            spread_pick = f"AWAY {sign}{a_point} ({odds.get('rl_away_price')}) [{book_name}] | {stars}"
+
+    alerts = [a for a in [
+        "🔥 HEAT" if temp != "N/A" and float(temp) > 85 else None,
+        f"🏟️ PARK ({park_f})" if park_f >= 108 else None,
+        f"⚖️ UMP ({ump})" if ump_m > 1.05 else None,
+        "💨 WIND OUT" if wind_impact == "OUT" else None,
+        "🧤 WIND IN" if wind_impact == "IN" else None,
+        "🔋 GASSED BP" if h_fatigue > 0.2 or a_fatigue > 0.2 else None
+    ] if a]
+
+    spread_fmt = f"{rl_hp} ({rl_hc})" if rl_hp != "N/A" else "N/A"
+
+    return [
+        today, home, away, hp_name, ap_name, 
+        ml_h, ml_a, spread_fmt, line,
+        exp_home, exp_away, expected_total,
+        hp_m['score'], ap_m['score'], h_bp['bp_score'], a_bp['bp_score'], 
+        h_fatigue, a_fatigue, temp, w_sp, w_dir, " | ".join(alerts), 
+        total_pick, ml_pick, spread_pick, total_stars, 
+        "", "" # Actual and Result
+    ]
+
 def run_scraper():
-    print("--- Starting MLB Scraper (Bridge Model Integrated) ---")
+    print("--- Starting MLB Scraper (Lineup Evaluator Enabled) ---")
     client = get_google_sheet_client()
     sheet = client.open("mlb-betting-app").worksheet("Master")
     check_headers(sheet)
@@ -64,102 +205,28 @@ def run_scraper():
     odds_data = get_mlb_odds()
     
     url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}&hydrate=probablePitcher,officials,weather"
-    response = requests.get(url).json()
+    response = session.get(url).json()
     games = response.get('dates', [{}])[0].get('games', [])
 
     existing_rows = sheet.get_all_values()
     row_map = {f"{r[0]}_{r[1]}_{r[2]}": i + 1 for i, r in enumerate(existing_rows) if len(r) >= 3}
     games_to_append = []
 
-    for game in games:
-        home, away = game['teams']['home']['team']['name'], game['teams']['away']['team']['name']
-        h_id, a_id = game['teams']['home']['team']['id'], game['teams']['away']['team']['id']
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(process_single_game, game, odds_data, today): game for game in games}
         
-        # Pitcher Info
-        hp_data = game['teams']['home'].get('probablePitcher', {})
-        ap_data = game['teams']['away'].get('probablePitcher', {})
-        hp_name, hp_id = hp_data.get('fullName', 'TBD'), hp_data.get('id', None)
-        ap_name, ap_id = ap_data.get('fullName', 'TBD'), ap_data.get('id', None)
-        
-        ump = next((o['official']['fullName'] for o in game.get('officials', []) if o['officialType'] == 'Home Plate'), "Unknown")
-        roof = game.get('weather', {}).get('condition', 'Open')
-        weather = get_stadium_weather(home, game.get('gameDate'), roof)
-        
-        temp, w_sp, w_dir, hum, w_deg = (weather['temp'], weather['wind_speed'], weather['wind_dir'], weather['humidity'], weather['wind_deg']) if weather else ("N/A", "N/A", "N/A", "N/A", "N/A")
-
-        matched_key = f"{today}_{home}_{away}"
-        line = odds_data.get(matched_key, {}).get('total', 'N/A')
-        ml = odds_data.get(matched_key, {}).get('ml', 'N/A')
-        book = odds_data.get(matched_key, {}).get('book', 'DraftKings')
-
-        # 1. Fetch Metrics
-        hp_m = get_pitcher_metrics(hp_id)
-        ap_m = get_pitcher_metrics(ap_id)
-        h_bp = get_bullpen_metrics(h_id)
-        a_bp = get_bullpen_metrics(a_id)
-        h_fatigue = get_bullpen_fatigue(h_id)
-        a_fatigue = get_bullpen_fatigue(a_id)
-        
-        # 2. Bridge Math: Starter (66%) + Bullpen (33%) + Fatigue
-        h_score = (hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + h_fatigue
-        a_score = (ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + a_fatigue
-        
-        park_f = PARK_FACTORS.get(home, 100)
-        ump_m = get_umpire_multiplier(ump)
-        wind_impact = calculate_wind_impact(home, w_deg, w_sp)
-        
-        expected_total = (h_score + a_score) * (park_f / 100.0) * ump_m
-        
-        if temp != "N/A":
-            t = float(temp)
-            if t > 85: expected_total += 0.3
-            elif t < 55: expected_total -= 0.3
-        if wind_impact == "OUT": expected_total += 0.6
-        elif wind_impact == "IN": expected_total -= 0.6
-        
-        expected_total = round(expected_total, 2)
-        
-        # 3. Decision Logic
-        model_pick = "PASS"
-        confidence_score = 0
-        if line != "N/A":
-            book_line = float(line)
-            edge = abs(expected_total - book_line)
-            if edge >= 0.75:
-                model_pick = "OVER" if expected_total > book_line else "UNDER"
-                model_pick = f"{model_pick} {book_line}"
-                if edge >= 1.75: confidence_score = 3
-                elif edge >= 1.25: confidence_score = 2
-                else: confidence_score = 1
-
-        alerts = []
-        if temp != "N/A" and float(temp) > 85: alerts.append("🔥 HEAT")
-        if park_f >= 108: alerts.append(f"🏟️ PARK ({park_f})")
-        if ump_m > 1.05: alerts.append(f"⚖️ UMP ({ump})")
-        if wind_impact == "OUT": alerts.append("💨 WIND OUT")
-        elif wind_impact == "IN": alerts.append("🧤 WIND IN")
-        if h_fatigue > 0.2 or a_fatigue > 0.2: alerts.append("🔋 GASSED BP")
-
-        # 24-Column row data setup
-        row_data = [
-            today, home, away, hp_name, ap_name, book, ml, line, 
-            expected_total, hp_m['score'], ap_m['score'], 
-            h_bp['bp_score'], a_bp['bp_score'], h_fatigue, a_fatigue, 
-            temp, w_sp, w_dir, hum, " | ".join(alerts), 
-            model_pick, confidence_score, 
-            "", "" # Cols 23 & 24: Actual and Result
-        ]
-        
-        if matched_key in row_map:
-            # Update A through V (1 to 22) to keep columns 23 and 24 safe from overrides
-            sheet.update(values=[row_data[:22]], range_name=f"A{row_map[matched_key]}:V{row_map[matched_key]}")
-        else:
-            games_to_append.append(row_data)
-        time.sleep(1)
+        for future in as_completed(futures):
+            row_data = future.result()
+            matched_key = f"{row_data[0]}_{row_data[1]}_{row_data[2]}"
+            
+            if matched_key in row_map:
+                sheet.update(values=[row_data[:26]], range_name=f"A{row_map[matched_key]}:Z{row_map[matched_key]}")
+            else:
+                games_to_append.append(row_data)
 
     if games_to_append:
         sheet.append_rows(games_to_append, value_input_option="USER_ENTERED")
-    print("✅ Success: Bridge Model sync complete.")
+    print("✅ Success: Accelerated Bridge Model sync complete.")
 
 if __name__ == "__main__":
     run_scraper()
