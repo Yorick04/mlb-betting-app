@@ -8,16 +8,15 @@ def update_master_results():
     sheet = client.open("mlb-betting-app").worksheet("Master")
     all_rows = sheet.get_all_records()
     
-    # We use US/Central to match your local Huntsville time
+    # Tracking US/Central to match local Huntsville execution time
     today_str = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
     
-    # 1. We now allow current day games (<=) to be checked
+    # 1. Gather all dates requiring a grade
     dates_to_check = set()
     for row in all_rows:
         row_date = str(row.get('Date/Time (CT)', ''))
         actual_val = str(row.get('Actual Total', '')).strip()
         
-        # FIX: Changed < to <= to include today's finished games
         if row_date and row_date <= today_str and actual_val == "":
             dates_to_check.add(row_date)
 
@@ -25,7 +24,7 @@ def update_master_results():
         print("No pending games to grade.")
         return
 
-    # 2. Bulk fetch scores
+    # 2. Bulk fetch scoreboard states from the MLB API
     scores = {}
     for d in dates_to_check:
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={d}"
@@ -37,7 +36,6 @@ def update_master_results():
                     detail = g['status']['detailedState']
                     matchup = f"{g['teams']['away']['team']['name']}@{g['teams']['home']['team']['name']}"
                     
-                    # Capture Final games OR Postponed games
                     if status == 'Final':
                         scores[f"{d}_{matchup}"] = {
                             "total": g['teams']['home'].get('score', 0) + g['teams']['away'].get('score', 0),
@@ -45,9 +43,10 @@ def update_master_results():
                         }
                     elif detail == "Postponed" or detail == "Cancelled":
                         scores[f"{d}_{matchup}"] = {"total": 0, "status": "PPD"}
-        except: continue
+        except: 
+            continue
 
-    # 3. Grade the sheet
+    # 3. Grade the sheet grid
     for i, row in enumerate(all_rows, start=2):
         row_date = str(row.get('Date/Time (CT)', ''))
         matchup = f"{row.get('Away')}@{row.get('Home')}"
@@ -76,9 +75,9 @@ def update_master_results():
                 else:
                     res = "PASS"
 
-            # Columns 19 and 20 for your 20-column layout
-            sheet.update_cell(i, 19, actual)
-            sheet.update_cell(i, 20, res)
+            # Cleanly drop stats into columns 23 & 24 at the end of the new 24-column sheet
+            sheet.update_cell(i, 23, actual)
+            sheet.update_cell(i, 24, res)
             print(f"Graded Row {i}: {matchup} -> {actual} ({res})")
             time.sleep(1)
 

@@ -3,11 +3,13 @@ from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 
+# Your utility imports
 from odds_utils import get_mlb_odds
 from weather_utils import get_stadium_weather
 from stadiums import STADIUM_COORDS, PARK_FACTORS, STADIUM_ORIENTATION 
 from umpire_utils import get_umpire_multiplier
 from pitcher_utils import get_pitcher_metrics
+from bullpen_utils import get_bullpen_metrics, get_bullpen_fatigue
 
 load_dotenv(override=True)
 
@@ -18,11 +20,12 @@ def get_google_sheet_client():
     return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
 
 def check_headers(sheet):
-    # 20-Column Layout
+    # The Definitive 24-Column Layout
     headers = [
         "Date/Time (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", 
         "Bookmaker", "ML Odds", "O/U Total", "Projected Total", 
-        "Home SP Score", "Away SP Score", "Temp", "Wind", "Wind Dir", 
+        "Home SP Score", "Away SP Score", "Home BP Score", "Away BP Score", 
+        "Home BP Fatigue", "Away BP Fatigue", "Temp", "Wind", "Wind Dir", 
         "Humidity", "Value Alert", "Model Pick", "Confidence Score", 
         "Actual Total", "Result"
     ]
@@ -32,9 +35,13 @@ def check_headers(sheet):
         first_row = []
 
     if not first_row or len(first_row) != len(headers):
-        print("--- Updating Sheet Headers to 20 Columns ---")
-        sheet.update(values=[headers], range_name='A1:T1')
-        sheet.format("A1:T1", {"textFormat": {"bold": True}})
+        print("--- Rebuilding Sheet Headers to 24 Columns ---")
+        # Safety wipe out to column AD to clear out old orphan data
+        sheet.update(values=[["" for _ in range(30)]], range_name='A1:AD1') 
+        
+        # Write clean headers
+        sheet.update(values=[headers], range_name='A1:X1')
+        sheet.format("A1:X1", {"textFormat": {"bold": True}})
         try: sheet.freeze(rows=1)
         except: pass
 
@@ -48,7 +55,7 @@ def calculate_wind_impact(home_team, wind_deg, wind_speed):
     return "CROSS"
 
 def run_scraper():
-    print("--- Starting MLB Scraper (Confidence Integrated) ---")
+    print("--- Starting MLB Scraper (Bridge Model Integrated) ---")
     client = get_google_sheet_client()
     sheet = client.open("mlb-betting-app").worksheet("Master")
     check_headers(sheet)
@@ -66,6 +73,9 @@ def run_scraper():
 
     for game in games:
         home, away = game['teams']['home']['team']['name'], game['teams']['away']['team']['name']
+        h_id, a_id = game['teams']['home']['team']['id'], game['teams']['away']['team']['id']
+        
+        # Pitcher Info
         hp_data = game['teams']['home'].get('probablePitcher', {})
         ap_data = game['teams']['away'].get('probablePitcher', {})
         hp_name, hp_id = hp_data.get('fullName', 'TBD'), hp_data.get('id', None)
@@ -82,15 +92,23 @@ def run_scraper():
         ml = odds_data.get(matched_key, {}).get('ml', 'N/A')
         book = odds_data.get(matched_key, {}).get('book', 'DraftKings')
 
-        hp_metrics = get_pitcher_metrics(hp_id)
-        ap_metrics = get_pitcher_metrics(ap_id)
+        # 1. Fetch Metrics
+        hp_m = get_pitcher_metrics(hp_id)
+        ap_m = get_pitcher_metrics(ap_id)
+        h_bp = get_bullpen_metrics(h_id)
+        a_bp = get_bullpen_metrics(a_id)
+        h_fatigue = get_bullpen_fatigue(h_id)
+        a_fatigue = get_bullpen_fatigue(a_id)
+        
+        # 2. Bridge Math: Starter (66%) + Bullpen (33%) + Fatigue
+        h_score = (hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + h_fatigue
+        a_score = (ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + a_fatigue
         
         park_f = PARK_FACTORS.get(home, 100)
         ump_m = get_umpire_multiplier(ump)
         wind_impact = calculate_wind_impact(home, w_deg, w_sp)
         
-        base_runs = hp_metrics['score'] + ap_metrics['score']
-        expected_total = base_runs * (park_f / 100.0) * ump_m
+        expected_total = (h_score + a_score) * (park_f / 100.0) * ump_m
         
         if temp != "N/A":
             t = float(temp)
@@ -101,18 +119,15 @@ def run_scraper():
         
         expected_total = round(expected_total, 2)
         
-        # CONFIDENCE CALCULATION
+        # 3. Decision Logic
         model_pick = "PASS"
         confidence_score = 0
         if line != "N/A":
             book_line = float(line)
             edge = abs(expected_total - book_line)
-            
             if edge >= 0.75:
                 model_pick = "OVER" if expected_total > book_line else "UNDER"
                 model_pick = f"{model_pick} {book_line}"
-                
-                # Confidence Levels: 1 (Low), 2 (Med), 3 (High)
                 if edge >= 1.75: confidence_score = 3
                 elif edge >= 1.25: confidence_score = 2
                 else: confidence_score = 1
@@ -123,26 +138,28 @@ def run_scraper():
         if ump_m > 1.05: alerts.append(f"⚖️ UMP ({ump})")
         if wind_impact == "OUT": alerts.append("💨 WIND OUT")
         elif wind_impact == "IN": alerts.append("🧤 WIND IN")
-        if "WIND OUT" in alerts and park_f > 105 and ump_m > 1.04: alerts.append("💣 NUCLEAR")
+        if h_fatigue > 0.2 or a_fatigue > 0.2: alerts.append("🔋 GASSED BP")
 
-        # 20-Column row data
+        # 24-Column row data setup
         row_data = [
             today, home, away, hp_name, ap_name, book, ml, line, 
-            expected_total, hp_metrics['score'], ap_metrics['score'], 
+            expected_total, hp_m['score'], ap_m['score'], 
+            h_bp['bp_score'], a_bp['bp_score'], h_fatigue, a_fatigue, 
             temp, w_sp, w_dir, hum, " | ".join(alerts), 
-            model_pick, confidence_score, # Cols 17 & 18
-            "", "" # Cols 19 & 20: Actual and Result
+            model_pick, confidence_score, 
+            "", "" # Cols 23 & 24: Actual and Result
         ]
         
         if matched_key in row_map:
-            sheet.update(values=[row_data[:18]], range_name=f"A{row_map[matched_key]}:R{row_map[matched_key]}")
+            # Update A through V (1 to 22) to keep columns 23 and 24 safe from overrides
+            sheet.update(values=[row_data[:22]], range_name=f"A{row_map[matched_key]}:V{row_map[matched_key]}")
         else:
             games_to_append.append(row_data)
         time.sleep(1)
 
     if games_to_append:
         sheet.append_rows(games_to_append, value_input_option="USER_ENTERED")
-    print("✅ Success: All predictions and confidence scores synced.")
+    print("✅ Success: Bridge Model sync complete.")
 
 if __name__ == "__main__":
     run_scraper()
