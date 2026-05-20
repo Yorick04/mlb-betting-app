@@ -2,18 +2,18 @@ import os, requests, pytz, time, json, gspread
 from datetime import datetime
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
+import db_manager # <-- IMPORT THE NEW DATABASE MANAGER
 
 load_dotenv(override=True)
 session = requests.Session()
 
 def get_google_sheet_client():
-    """Standalone client to prevent circular imports with scraper.py"""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_info = json.loads(os.getenv("GOOGLE_SHEETS_JSON"))
     return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
 
 def update_master_results():
-    print("--- Auditing Master Sheet (Live Catch-Up) ---")
+    print("--- Auditing Master Sheet & Database (Live Catch-Up) ---")
     client = get_google_sheet_client()
     sheet = client.open("mlb-betting-app").worksheet("Master")
     all_rows = sheet.get_all_records()
@@ -39,17 +39,21 @@ def update_master_results():
                 for g in date_obj.get('games', []):
                     status = g['status']['abstractGameState']
                     detail = g['status']['detailedState']
-                    matchup = f"{g['teams']['away']['team']['name']}@{g['teams']['home']['team']['name']}"
+                    home_team = g['teams']['home']['team']['name']
+                    away_team = g['teams']['away']['team']['name']
+                    matchup = f"{away_team}@{home_team}"
+                    db_game_id = f"{d}_{home_team}_{away_team}" # Used to match our SQLite ID
                     
                     if status == 'Final':
                         scores[f"{d}_{matchup}"] = {
                             "home_score": g['teams']['home'].get('score', 0),
                             "away_score": g['teams']['away'].get('score', 0),
                             "total": g['teams']['home'].get('score', 0) + g['teams']['away'].get('score', 0),
-                            "status": "FINAL"
+                            "status": "FINAL",
+                            "db_id": db_game_id
                         }
                     elif detail in ["Postponed", "Cancelled"]:
-                        scores[f"{d}_{matchup}"] = {"status": "PPD"}
+                        scores[f"{d}_{matchup}"] = {"status": "PPD", "db_id": db_game_id}
         except: continue
 
     cells_to_update = []
@@ -63,12 +67,19 @@ def update_master_results():
             game_data = scores[score_key]
             
             if game_data["status"] == "PPD":
+                # Update Google Sheets
                 cells_to_update.append(gspread.Cell(row=i, col=27, value="PPD"))
                 cells_to_update.append(gspread.Cell(row=i, col=28, value="POSTPONED"))
+                
+                # Update SQLite Database
+                db_manager.update_final_score(game_data["db_id"], None, None, "PPD")
                 continue
                 
             actual_home, actual_away, actual_total = game_data["home_score"], game_data["away_score"], game_data["total"]
             formatted_actual = f"H: {actual_home} | A: {actual_away} | T: {actual_total}"
+            
+            # --- DATABASE UPDATE: Save the final target scores for Machine Learning ---
+            db_manager.update_final_score(game_data["db_id"], actual_home, actual_away, "FINAL")
             
             t_pick = str(row.get('Total Pick', 'PASS')).upper()
             m_pick = str(row.get('ML Pick', 'PASS')).upper()
@@ -76,7 +87,6 @@ def update_master_results():
             
             results_str = []
             
-            # 1. Total Grade
             if "OVER" in t_pick or "UNDER" in t_pick:
                 try:
                     line = float(row.get('O/U Total'))
@@ -85,15 +95,12 @@ def update_master_results():
                     elif "UNDER" in t_pick: results_str.append("T: WIN" if actual_total < line else "T: LOSS")
                 except: pass
 
-            # 2. ML Grade
             if m_pick != "PASS":
                 if "HOME" in m_pick: results_str.append("ML: WIN" if actual_home > actual_away else "ML: LOSS")
                 elif "AWAY" in m_pick: results_str.append("ML: WIN" if actual_away > actual_home else "ML: LOSS")
 
-            # 3. Spread Grade (Supports Home and Away grading securely)
             if s_pick != "PASS":
                 try:
-                    # Extracts the pure number out of strings like "HOME -1.5 (-110) [FanDuel] | ★★"
                     spread_val = float(s_pick.split()[1])
                     if "HOME" in s_pick:
                         adj_home = actual_home + spread_val
@@ -107,10 +114,9 @@ def update_master_results():
 
             final_res = " | ".join(results_str) if results_str else "NO ACTION"
 
-            # Write out to Cols 27 and 28 via batch update
             cells_to_update.append(gspread.Cell(row=i, col=27, value=formatted_actual))
             cells_to_update.append(gspread.Cell(row=i, col=28, value=final_res))
-            print(f"Graded Row {i}: {matchup} -> {final_res}")
+            print(f"Graded Row {i}: {matchup} -> {final_res} (Saved to DB)")
 
     if cells_to_update:
         sheet.update_cells(cells_to_update)

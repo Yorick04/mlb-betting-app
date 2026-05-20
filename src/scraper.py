@@ -12,12 +12,12 @@ from umpire_utils import get_umpire_multiplier
 from pitcher_utils import get_pitcher_metrics
 from bullpen_utils import get_bullpen_metrics, get_bullpen_fatigue
 from hitter_utils import get_lineup_multiplier
+import db_manager # <-- IMPORT THE NEW DATABASE MANAGER
 
 load_dotenv(override=True)
 session = requests.Session()
 
 def get_google_sheet_client():
-    """Standalone client to prevent circular imports"""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_info = json.loads(os.getenv("GOOGLE_SHEETS_JSON"))
     return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
@@ -35,7 +35,6 @@ def check_headers(sheet):
     except: first_row = []
 
     if not first_row or len(first_row) != len(headers):
-        print("--- Expanding Sheet Headers to 28 Columns ---")
         sheet.update(values=[["" for _ in range(30)]], range_name='A1:AD1') 
         sheet.update(values=[headers], range_name='A1:AB1')
         sheet.format("A1:AB1", {"textFormat": {"bold": True}})
@@ -70,8 +69,6 @@ def process_single_game(game, odds_data, today):
 
     matched_key = f"{today}_{home}_{away}"
     odds = odds_data.get(matched_key, {})
-    
-    # Hardcoding to DraftKings
     book_name = "DraftKings"
     
     line = odds.get('total', 'N/A')
@@ -87,11 +84,9 @@ def process_single_game(game, odds_data, today):
     h_fatigue = get_bullpen_fatigue(h_id)
     a_fatigue = get_bullpen_fatigue(a_id)
     
-    # NEW: Hitter Utils - Calculate Offensive Threat Multiplier based on pitcher handedness
     h_lineup_mult = get_lineup_multiplier(h_id, ap_id)
     a_lineup_mult = get_lineup_multiplier(a_id, hp_id)
     
-    # NEW: Apply the lineup multiplier to the expected base runs
     home_base_runs = ((ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + a_fatigue) * h_lineup_mult
     away_base_runs = ((hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + h_fatigue) * a_lineup_mult
     
@@ -111,11 +106,9 @@ def process_single_game(game, odds_data, today):
     exp_away = round(away_base_runs * env_multiplier, 2)
     expected_total = round(exp_home + exp_away, 2)
     
-    # ---- ISOLATED CONFIDENCE BETTING LOGIC ----
     total_pick, ml_pick, spread_pick = "PASS", "PASS", "PASS"
     total_stars = 0
     
-    # 1. Totals (O/U)
     if line != "N/A":
         edge = abs(expected_total - float(line))
         if edge >= 0.75:
@@ -124,13 +117,10 @@ def process_single_game(game, odds_data, today):
             direction = "OVER" if expected_total > float(line) else "UNDER"
             total_pick = f"{direction} {line} [{book_name}] | {stars}"
 
-    # 2. Moneyline Edge
     if exp_home > 0 and exp_away > 0 and ml_h != "N/A" and ml_a != "N/A":
         model_h_prob = (exp_home**1.83) / (exp_home**1.83 + exp_away**1.83)
         book_h_prob, book_a_prob = implied_probability(ml_h), implied_probability(ml_a)
-
         h_edge, a_edge = (model_h_prob - book_h_prob), ((1.0 - model_h_prob) - book_a_prob)
-
         if book_h_prob > 0 and h_edge > 0.05:
             stars = "★★★" if h_edge > 0.12 else "★★" if h_edge > 0.08 else "★"
             total_stars += len(stars)
@@ -140,18 +130,13 @@ def process_single_game(game, odds_data, today):
             total_stars += len(stars)
             ml_pick = f"AWAY {ml_a} [{book_name}] | {stars}"
 
-    # 3. Spread (Run Line) Edge using Normal Approximation of Skellam Distribution
     if rl_hp != "N/A" and odds.get('rl_away_point') != "N/A":
         h_point, a_point = float(rl_hp), float(odds.get('rl_away_point'))
-        
         mean_run_diff = exp_home - exp_away 
-        var_run_diff = exp_home + exp_away # Variance of Skellam is mu1 + mu2
-        
+        var_run_diff = exp_home + exp_away
         if var_run_diff > 0:
-            # z = (mean - target_margin) / std_dev
             z_score_h = (mean_run_diff - (-h_point)) / math.sqrt(var_run_diff)
             prob_h_cover = 0.5 * (1 + math.erf(z_score_h / math.sqrt(2)))
-            
             z_score_a = (-mean_run_diff - (-a_point)) / math.sqrt(var_run_diff)
             prob_a_cover = 0.5 * (1 + math.erf(z_score_a / math.sqrt(2)))
         else:
@@ -159,7 +144,6 @@ def process_single_game(game, odds_data, today):
             
         book_h_rl_prob = implied_probability(rl_hc)
         book_a_rl_prob = implied_probability(odds.get('rl_away_price'))
-
         h_edge = prob_h_cover - book_h_rl_prob
         a_edge = prob_a_cover - book_a_rl_prob
         
@@ -184,19 +168,51 @@ def process_single_game(game, odds_data, today):
     ] if a]
 
     spread_fmt = f"{rl_hp} ({rl_hc})" if rl_hp != "N/A" else "N/A"
+    
+    # --- SQLITE DATABASE DICTIONARY ---
+    db_game_data = {
+        "game_id": matched_key,
+        "game_date": today,
+        "home_team": home,
+        "away_team": away,
+        "home_pitcher": hp_name,
+        "away_pitcher": ap_name,
+        "home_sp_score": hp_m['score'],
+        "away_sp_score": ap_m['score'],
+        "home_bp_score": h_bp['bp_score'],
+        "away_bp_score": a_bp['bp_score'],
+        "home_fatigue": h_fatigue,
+        "away_fatigue": a_fatigue,
+        "home_lineup_mult": h_lineup_mult,  # <-- ADDED HERE
+        "away_lineup_mult": a_lineup_mult,  # <-- ADDED HERE
+        "temp": temp,
+        "wind_speed": w_sp,
+        "wind_dir": w_dir,
+        "park_factor": park_f,
+        "umpire_multiplier": ump_m,
+        "ml_home": ml_h,
+        "ml_away": ml_a,
+        "spread": spread_fmt,
+        "ou_total": line,
+        "projected_home_runs": exp_home,
+        "projected_away_runs": exp_away
+    }
 
-    return [
+    # Format for Google Sheets (Existing logic)
+    sheet_row = [
         today, home, away, hp_name, ap_name, 
         ml_h, ml_a, spread_fmt, line,
         exp_home, exp_away, expected_total,
         hp_m['score'], ap_m['score'], h_bp['bp_score'], a_bp['bp_score'], 
         h_fatigue, a_fatigue, temp, w_sp, w_dir, " | ".join(alerts), 
         total_pick, ml_pick, spread_pick, total_stars, 
-        "", "" # Actual and Result
+        "", "" 
     ]
+    
+    return sheet_row, db_game_data
 
 def run_scraper():
-    print("--- Starting MLB Scraper (Lineup Evaluator Enabled) ---")
+    print("--- Starting MLB Scraper (Database & Sheets Sync) ---")
     client = get_google_sheet_client()
     sheet = client.open("mlb-betting-app").worksheet("Master")
     check_headers(sheet)
@@ -216,17 +232,21 @@ def run_scraper():
         futures = {executor.submit(process_single_game, game, odds_data, today): game for game in games}
         
         for future in as_completed(futures):
-            row_data = future.result()
-            matched_key = f"{row_data[0]}_{row_data[1]}_{row_data[2]}"
+            sheet_row_data, db_game_data = future.result()
             
+            # 1. Update SQLite Database for future Machine Learning
+            db_manager.upsert_game(db_game_data)
+            
+            # 2. Update Google Sheet for manual viewing
+            matched_key = f"{sheet_row_data[0]}_{sheet_row_data[1]}_{sheet_row_data[2]}"
             if matched_key in row_map:
-                sheet.update(values=[row_data[:26]], range_name=f"A{row_map[matched_key]}:Z{row_map[matched_key]}")
+                sheet.update(values=[sheet_row_data[:26]], range_name=f"A{row_map[matched_key]}:Z{row_map[matched_key]}")
             else:
-                games_to_append.append(row_data)
+                games_to_append.append(sheet_row_data)
 
     if games_to_append:
         sheet.append_rows(games_to_append, value_input_option="USER_ENTERED")
-    print("✅ Success: Accelerated Bridge Model sync complete.")
+    print("✅ Success: SQLite DB and Google Sheets sync complete.")
 
 if __name__ == "__main__":
     run_scraper()
