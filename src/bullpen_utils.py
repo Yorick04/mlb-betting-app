@@ -16,28 +16,30 @@ def get_bullpen_metrics(team_id):
     except:
         return {"bp_score": 4.50, "era": 4.20, "whip": 1.35}
 
-def get_bullpen_fatigue(team_id):
-    """Optimized: Fetches all games from the last 3 days in ONE call."""
+def get_bullpen_fatigue(team_id, game_date_str=None):
+    """Optimized: Fetches games from the 3 days prior to the given game date."""
     tz = pytz.timezone('US/Central')
-    today = datetime.now(tz)
-    start_date = (today - timedelta(days=3)).strftime('%Y-%m-%d')
-    end_date = (today - timedelta(days=1)).strftime('%Y-%m-%d')
+    
+    if game_date_str:
+        # If a date is provided (like during historical scraping), use it
+        game_date = datetime.strptime(game_date_str, '%Y-%m-%d').replace(tzinfo=tz)
+    else:
+        # Fallback to today for live daily scraping
+        game_date = datetime.now(tz)
+        
+    start_date = (game_date - timedelta(days=3)).strftime('%Y-%m-%d')
+    end_date = (game_date - timedelta(days=1)).strftime('%Y-%m-%d')
     
     fatigue_penalty = 0.0
     
-    # Hydrating boxscore in the schedule request eliminates the N+1 problem
     url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&teamId={team_id}&startDate={start_date}&endDate={end_date}&hydrate=team,boxscore"
     try:
         resp = session.get(url, timeout=10).json()
         for date_obj in resp.get('dates', []):
             for game in date_obj.get('games', []):
                 is_home = (game['teams']['home']['team']['id'] == team_id)
-                
-                # Fetch boxscore directly from hydrated game object
                 try:
                     pitchers = game['boxscore']['teams']['home']['pitchers'] if is_home else game['boxscore']['teams']['away']['pitchers']
-                    
-                    # Penalty for heavy bullpen usage
                     if len(pitchers) > 5:
                         fatigue_penalty += 0.15
                 except KeyError:

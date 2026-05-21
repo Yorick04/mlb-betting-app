@@ -91,19 +91,24 @@ def process_historical_game(game, date_str):
     # --- USE IN-MEMORY CACHE FOR BULLPENS TO SPEED UP SCRIPT ---
     if h_id not in bp_metrics_cache: bp_metrics_cache[h_id] = get_bullpen_metrics(h_id)
     if a_id not in bp_metrics_cache: bp_metrics_cache[a_id] = get_bullpen_metrics(a_id)
-    if h_id not in bp_fatigue_cache: bp_fatigue_cache[h_id] = get_bullpen_fatigue(h_id)
-    if a_id not in bp_fatigue_cache: bp_fatigue_cache[a_id] = get_bullpen_fatigue(a_id)
+    
+    # We must use a date-specific key for fatigue so we don't cache one day's fatigue for the whole season
+    h_fatigue_key = f"{h_id}_{date_str}"
+    a_fatigue_key = f"{a_id}_{date_str}"
+    
+    if h_fatigue_key not in bp_fatigue_cache: bp_fatigue_cache[h_fatigue_key] = get_bullpen_fatigue(h_id, date_str)
+    if a_fatigue_key not in bp_fatigue_cache: bp_fatigue_cache[a_fatigue_key] = get_bullpen_fatigue(a_id, date_str)
 
     h_bp = bp_metrics_cache[h_id]
     a_bp = bp_metrics_cache[a_id]
-    h_fatigue = bp_fatigue_cache[h_id]
-    a_fatigue = bp_fatigue_cache[a_id]
+    h_fatigue = bp_fatigue_cache[h_fatigue_key]
+    a_fatigue = bp_fatigue_cache[a_fatigue_key]
     
-    h_lineup_mult = get_lineup_multiplier(h_id, ap_id)
-    a_lineup_mult = get_lineup_multiplier(a_id, hp_id)
+    h_lineup_mult = get_lineup_multiplier(h_id, ap_id, date_str)
+    a_lineup_mult = get_lineup_multiplier(a_id, hp_id, date_str)
     
-    home_base_runs = ((ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + a_fatigue) * h_lineup_mult
-    away_base_runs = ((hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + h_fatigue) * a_lineup_mult
+    home_base_runs = ((ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + h_fatigue) * h_lineup_mult
+    away_base_runs = ((hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + a_fatigue) * a_lineup_mult
     
     park_f = PARK_FACTORS.get(original_home, 100)
     ump_m = get_umpire_multiplier(ump)
@@ -190,8 +195,12 @@ def backfill_season(start_date_str, end_date_str):
     print("✅ Historical Data Backfill Complete!")
 
 if __name__ == "__main__":
-    # Backfill XXXX Season (Previously completed, but re-run for database continuity)
-    print("🚀 Starting 2026 Season Backfill...")
-    backfill_season("2026-03-27", "2026-05-19")
     
-    print("✅ All historical data (2024 + 2025 + 2026) successfully synced!")
+    # Backfilling the 2024 MLB Regular Season (Overwriting old dead data with new utility fixes!)
+    backfill_season("2024-03-28", "2024-09-29")
+
+    # Backfilling the 2025 MLB Regular Season
+    backfill_season("2025-03-26", "2025-09-28")
+    
+    # Backfilling the 2026 MLB Regular Season (Up to yesterday)
+    backfill_season("2026-03-27", "2026-05-19")
