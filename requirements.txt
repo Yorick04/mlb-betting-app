@@ -1,5 +1,9 @@
+pandas
+pybaseball
 requests
+python-dotenv
 gspread
 oauth2client
+scikit-learn
+xgboost
 pytz
-python-dotenv
