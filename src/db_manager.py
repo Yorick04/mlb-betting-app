@@ -7,6 +7,10 @@ def get_connection():
     """Creates a connection to the SQLite database."""
     return sqlite3.connect(DB_FILE)
 
+def generate_game_id(date_str, home_team, away_team):
+    """The universal ID generator used by all scripts."""
+    return f"{date_str}_{home_team}_{away_team}"
+
 def setup_database():
     """Creates the necessary tables for Machine Learning if they don't exist."""
     conn = get_connection()
@@ -62,6 +66,10 @@ def upsert_game(game_data):
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Ensure game_id exists based on the standard generator
+    if 'game_id' not in game_data and 'game_date' in game_data:
+        game_data['game_id'] = generate_game_id(game_data['game_date'], game_data['home_team'], game_data['away_team'])
+        
     # Convert 'N/A' strings to actual None (NULL in SQL) for better ML processing later
     clean_data = {k: (None if v == "N/A" else v) for k, v in game_data.items()}
     
@@ -84,10 +92,10 @@ def upsert_game(game_data):
         away_sp_score=excluded.away_sp_score,
         home_lineup_mult=excluded.home_lineup_mult, -- NEW
         away_lineup_mult=excluded.away_lineup_mult, -- NEW
-        ml_home=excluded.ml_home,
-        ml_away=excluded.ml_away,
-        spread=excluded.spread,
-        ou_total=excluded.ou_total;
+        ml_home=COALESCE(excluded.ml_home, game_logs.ml_home),
+        ml_away=COALESCE(excluded.ml_away, game_logs.ml_away),
+        spread=COALESCE(excluded.spread, game_logs.spread),
+        ou_total=COALESCE(excluded.ou_total, game_logs.ou_total);
     '''
     
     cursor.execute(sql, clean_data)

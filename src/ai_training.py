@@ -8,11 +8,11 @@ from sklearn.metrics import mean_absolute_error, r2_score
 import joblib
 
 def train_mybaseball_pal_ai():
-    # 1. Connect and Fetch
     print("📥 Fetching historical data from SQLite...")
     conn = sqlite3.connect("mlb_historical_data.db")
     
-    query = "SELECT * FROM game_logs WHERE status = 'FINAL'"
+    # Filter for fresh 2026 data
+    query = "SELECT * FROM game_logs WHERE status = 'FINAL' AND game_date >= '2026-03-01'"
     df = pd.read_sql_query(query, conn)
     conn.close()
     
@@ -22,10 +22,9 @@ def train_mybaseball_pal_ai():
         
     print(f"✅ Loaded {len(df)} games.")
 
-    # 2. Advanced Feature Engineering
-    # We calculate the Run Differential as a target, which is often 
-    # more predictable than raw scoring totals.
-    df['run_diff'] = df['actual_home_score'] - df['actual_away_score']
+    # 2. Advanced Feature Engineering (TWO TARGETS)
+    df['run_diff'] = df['actual_home_score'] - df['actual_away_score'] # Target 1: Moneyline
+    df['total_runs'] = df['actual_home_score'] + df['actual_away_score'] # Target 2: Over/Under
     
     features = [
         'home_sp_score', 'away_sp_score', 
@@ -35,68 +34,57 @@ def train_mybaseball_pal_ai():
         'temp', 'park_factor', 'umpire_multiplier'
     ]
     
-    # 3. Intelligent Null Screening (Imputation)
     fill_values = {
-        'temp': 72.0,
-        'park_factor': 100.0,
-        'umpire_multiplier': 1.0,
-        'home_fatigue': 0.0,
-        'away_fatigue': 0.0,
-        'home_lineup_mult': 1.0,
-        'away_lineup_mult': 1.0
+        'temp': 72.0, 'park_factor': 100.0, 'umpire_multiplier': 1.0,
+        'home_fatigue': 0.0, 'away_fatigue': 0.0,
+        'home_lineup_mult': 1.0, 'away_lineup_mult': 1.0
     }
     
     df = df.fillna(value=fill_values)
     df = df.dropna(subset=['actual_home_score', 'actual_away_score'])
     
-    print(f"✅ Data Sanitized: {len(df)} games ready for training.")
+    print(f"✅ Data Sanitized: {len(df)} games ready for training.\n")
 
     X = df[features]
-    y = df['run_diff'] # Changed target to Run Differential
+    y_ml = df['run_diff']
+    y_ou = df['total_runs']
 
-    # 4. Scale Features
+    # 3. Scale Features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # 5. Train/Test Split
-    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
-
-    # 6. Initialize and Train
-    # Using a slightly larger forest and depth to capture complex non-linear patterns
-    model = RandomForestRegressor(
-        n_estimators=500, 
-        max_depth=12, 
-        min_samples_leaf=15, 
-        random_state=42,
-        n_jobs=-1
-    )
+    # 4. Train Model 1: Moneyline (Run Differential)
+    print("🤖 Training Model 1: Moneyline / Run Differential...")
+    X_train_ml, X_test_ml, y_train_ml, y_test_ml = train_test_split(X_scaled, y_ml, test_size=0.2, random_state=42)
     
-    print("🤖 Training model on Run Differential...")
-    model.fit(X_train, y_train)
-
-    # 7. Evaluation
-    predictions = model.predict(X_test)
-    mae = mean_absolute_error(y_test, predictions)
-    r2 = r2_score(y_test, predictions)
+    model_ml = RandomForestRegressor(n_estimators=500, max_depth=5, min_samples_leaf=10, random_state=42, n_jobs=-1)
+    model_ml.fit(X_train_ml, y_train_ml)
     
-    print("\n--- Model Performance Report (Run Differential) ---")
-    print(f"Mean Absolute Error: {mae:.2f} runs")
-    print(f"R^2 Score: {r2:.3f}")
-    print("--------------------------------\n")
+    preds_ml = model_ml.predict(X_test_ml)
+    correct_ml_picks = sum((preds_ml > 0) == (y_test_ml > 0))
+    ml_accuracy = (correct_ml_picks / len(y_test_ml)) * 100
     
-    # 8. Feature Importance
-    importance = pd.Series(model.feature_importances_, index=features).sort_values(ascending=False)
-    print("📊 Top Influencing Factors:")
-    print(importance.head(5))
+    print(f"   -> Implied ML Accuracy: {ml_accuracy:.1f}%\n")
 
-    print("\n✅ Training complete! The model now predicts run differential instead of raw scores.")
+    # 5. Train Model 2: Over/Under (Total Runs)
+    print("🤖 Training Model 2: Over/Under (Total Runs)...")
+    X_train_ou, X_test_ou, y_train_ou, y_test_ou = train_test_split(X_scaled, y_ou, test_size=0.2, random_state=42)
+    
+    # Slightly deeper tree for totals to capture combined weather/umpire nuances
+    model_ou = RandomForestRegressor(n_estimators=500, max_depth=6, min_samples_leaf=10, random_state=42, n_jobs=-1)
+    model_ou.fit(X_train_ou, y_train_ou)
+    
+    preds_ou = model_ou.predict(X_test_ou)
+    mae_ou = mean_absolute_error(y_test_ou, preds_ou)
+    
+    print(f"   -> Mean Absolute Error: {mae_ou:.2f} runs\n")
 
-    # 9. Save the Model and Scaler for Production
-    print("\n💾 Saving model and scaler for daily predictions...")
-    joblib.dump(model, 'mlb_model.pkl')
+    # 6. Save the Suite
+    print("💾 Saving the Ballpark Pal Suite...")
+    joblib.dump(model_ml, 'mlb_ml_model.pkl')
+    joblib.dump(model_ou, 'mlb_ou_model.pkl')
     joblib.dump(scaler, 'scaler.pkl')
-    print("✅ Model successfully saved as 'mlb_model.pkl'")
-    print("✅ Scaler successfully saved as 'scaler.pkl'")
+    print("✅ Successfully saved: mlb_ml_model.pkl, mlb_ou_model.pkl, scaler.pkl")
 
 if __name__ == "__main__":
     train_mybaseball_pal_ai()

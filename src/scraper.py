@@ -4,6 +4,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
+import statcast_utils
 
 from odds_utils import get_mlb_odds
 from weather_utils import get_stadium_weather
@@ -12,7 +13,7 @@ from umpire_utils import get_umpire_multiplier
 from pitcher_utils import get_pitcher_metrics
 from bullpen_utils import get_bullpen_metrics, get_bullpen_fatigue
 from hitter_utils import get_lineup_multiplier
-import db_manager # <-- IMPORT THE NEW DATABASE MANAGER
+import db_manager
 
 load_dotenv(override=True)
 session = requests.Session()
@@ -62,6 +63,15 @@ def process_single_game(game, odds_data, today):
     hp_name, hp_id = hp_data.get('fullName', 'TBD'), hp_data.get('id', None)
     ap_name, ap_id = ap_data.get('fullName', 'TBD'), ap_data.get('id', None)
     
+    # --- STATCAST XSTATS DATA PULL ---
+    h_sp_xera = statcast_utils.get_pitcher_xera(hp_name) if hp_name != 'TBD' else None
+    a_sp_xera = statcast_utils.get_pitcher_xera(ap_name) if ap_name != 'TBD' else None
+    
+    h_lineup_xba = statcast_utils.get_lineup_xba(home)
+    a_lineup_xba = statcast_utils.get_lineup_xba(away)
+    h_lineup_xslg = statcast_utils.get_lineup_xslg(home)
+    a_lineup_xslg = statcast_utils.get_lineup_xslg(away)
+    
     ump = next((o['official']['fullName'] for o in game.get('officials', []) if o['officialType'] == 'Home Plate'), "Unknown")
     roof = game.get('weather', {}).get('condition', 'Open')
     weather = get_stadium_weather(home, game.get('gameDate'), roof)
@@ -87,8 +97,8 @@ def process_single_game(game, odds_data, today):
     h_lineup_mult = get_lineup_multiplier(h_id, ap_id)
     a_lineup_mult = get_lineup_multiplier(a_id, hp_id)
     
-    home_base_runs = ((ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + a_fatigue) * h_lineup_mult
-    away_base_runs = ((hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + h_fatigue) * a_lineup_mult
+    home_base_runs = ((ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + h_fatigue) * h_lineup_mult
+    away_base_runs = ((hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + a_fatigue) * a_lineup_mult
     
     park_f = PARK_FACTORS.get(home, 100)
     ump_m = get_umpire_multiplier(ump)
@@ -183,8 +193,8 @@ def process_single_game(game, odds_data, today):
         "away_bp_score": a_bp['bp_score'],
         "home_fatigue": h_fatigue,
         "away_fatigue": a_fatigue,
-        "home_lineup_mult": h_lineup_mult,  # <-- ADDED HERE
-        "away_lineup_mult": a_lineup_mult,  # <-- ADDED HERE
+        "home_lineup_mult": h_lineup_mult, 
+        "away_lineup_mult": a_lineup_mult, 
         "temp": temp,
         "wind_speed": w_sp,
         "wind_dir": w_dir,
@@ -195,10 +205,15 @@ def process_single_game(game, odds_data, today):
         "spread": spread_fmt,
         "ou_total": line,
         "projected_home_runs": exp_home,
-        "projected_away_runs": exp_away
+        "projected_away_runs": exp_away,
+        "home_sp_xERA": h_sp_xera,
+        "away_sp_xERA": a_sp_xera,
+        "home_lineup_xBA": h_lineup_xba,
+        "away_lineup_xBA": a_lineup_xba,
+        "home_lineup_xSLG": h_lineup_xslg,
+        "away_lineup_xSLG": a_lineup_xslg
     }
 
-    # Format for Google Sheets (Existing logic)
     sheet_row = [
         today, home, away, hp_name, ap_name, 
         ml_h, ml_a, spread_fmt, line,
@@ -220,6 +235,9 @@ def run_scraper():
     today = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
     odds_data = get_mlb_odds()
     
+    # Pre-load the cache outside of the thread pool so we only ping the API once
+    statcast_utils.load_statcast_data()
+    
     url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}&hydrate=probablePitcher,officials,weather"
     response = session.get(url).json()
     games = response.get('dates', [{}])[0].get('games', [])
@@ -228,16 +246,15 @@ def run_scraper():
     row_map = {f"{r[0]}_{r[1]}_{r[2]}": i + 1 for i, r in enumerate(existing_rows) if len(r) >= 3}
     games_to_append = []
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    # Reduced workers to 3 to prevent Weather API rate limits (429 errors)
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(process_single_game, game, odds_data, today): game for game in games}
         
         for future in as_completed(futures):
             sheet_row_data, db_game_data = future.result()
             
-            # 1. Update SQLite Database for future Machine Learning
             db_manager.upsert_game(db_game_data)
             
-            # 2. Update Google Sheet for manual viewing
             matched_key = f"{sheet_row_data[0]}_{sheet_row_data[1]}_{sheet_row_data[2]}"
             if matched_key in row_map:
                 sheet.update(values=[sheet_row_data[:26]], range_name=f"A{row_map[matched_key]}:Z{row_map[matched_key]}")

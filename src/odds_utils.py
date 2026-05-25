@@ -1,10 +1,10 @@
 import os, requests, pytz
 from dotenv import load_dotenv
 from datetime import datetime
+import db_manager
 
 load_dotenv(override=True)
 
-# Standardized session for faster, reused API connections
 session = requests.Session()
 
 TEAM_MAP = {
@@ -18,22 +18,38 @@ TEAM_MAP = {
 def get_mlb_odds():
     api_key = os.getenv("ODDS_API_KEY")
     url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
-    # Added 'spreads' to markets
     params = {'apiKey': api_key, 'regions': 'us', 'markets': 'h2h,totals,spreads', 'bookmakers': 'draftkings', 'oddsFormat': 'american'}
     
     try:
         data = session.get(url, params=params).json()
         odds_dict = {}
+        
+        # Get current times for filtering
+        now_utc = datetime.now(pytz.utc)
+        today_ct_str = now_utc.astimezone(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
+        
         for game in data:
+            comm_utc = datetime.strptime(game['commence_time'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
+            comm_ct = comm_utc.astimezone(pytz.timezone('US/Central'))
+            date_str = comm_ct.strftime('%Y-%m-%d')
+            
+            # THE FIX: Strict Date & Time Filtering
+            if date_str != today_ct_str:
+                continue # Skip tomorrow's games (e.g., the Red Sox)
+                
+            if comm_utc < now_utc:
+                continue # Skip games that have already started today
+                
             home = TEAM_MAP.get(game['home_team'], game['home_team'])
             away = TEAM_MAP.get(game['away_team'], game['away_team'])
-            
-            comm_utc = datetime.strptime(game['commence_time'], "%Y-%m-%dT%H:%M:%SZ")
-            comm_ct = comm_utc.replace(tzinfo=pytz.utc).astimezone(pytz.timezone('US/Central'))
-            key = f"{comm_ct.strftime('%Y-%m-%d')}_{home}_{away}"
+            key = db_manager.generate_game_id(date_str, home, away)
             
             odds_data = {
-                'ml_home': "N/A", 'ml_away': "N/A", 'total': "N/A",
+                'game_id': key,
+                'game_date': date_str,
+                'home_team': home,
+                'away_team': away,
+                'ml_home': "N/A", 'ml_away': "N/A", 'total': "N/A", 'ou_total': "N/A", 'spread': "N/A",
                 'rl_home_point': "N/A", 'rl_home_price': "N/A",
                 'rl_away_point': "N/A", 'rl_away_price': "N/A",
                 'book': 'DraftKings'
@@ -45,13 +61,15 @@ def get_mlb_odds():
                         odds_data['ml_home'] = next((o['price'] for o in market['outcomes'] if TEAM_MAP.get(o['name'], o['name']) == home), "N/A")
                         odds_data['ml_away'] = next((o['price'] for o in market['outcomes'] if TEAM_MAP.get(o['name'], o['name']) == away), "N/A")
                     elif market['key'] == 'totals':
-                        odds_data['total'] = market['outcomes'][0].get('point', 'N/A')
+                        point = market['outcomes'][0].get('point', 'N/A')
+                        odds_data['total'] = point
+                        odds_data['ou_total'] = point
                     elif market['key'] == 'spreads':
-                        # Grab run line data
                         for o in market['outcomes']:
                             if TEAM_MAP.get(o['name'], o['name']) == home:
                                 odds_data['rl_home_point'] = o.get('point', "N/A")
                                 odds_data['rl_home_price'] = o.get('price', "N/A")
+                                odds_data['spread'] = o.get('point', "N/A")
                             else:
                                 odds_data['rl_away_point'] = o.get('point', "N/A")
                                 odds_data['rl_away_price'] = o.get('price', "N/A")
