@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests python-dotenv gspread oauth2client pytz
+          pip install -r requirements.txt
 
       - name: Run Scraper and Results Tracker
         env:
@@ -38,7 +38,6 @@ jobs:
           python src/scraper.py
           python src/results_tracker.py
 
-      # FIXED INDENTATION BELOW
       - name: Commit and push updated database
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
