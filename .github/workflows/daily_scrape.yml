@@ -4,17 +4,13 @@ on:
   push:
     branches: [ main ]
   schedule:
-    # Runs at 18:00 UTC (1:00 PM CT) and 21:00 UTC (4:00 PM CT)
-    - cron: '0 18,21 * * *'
+    # Runs at 09:00 UTC (4:00 AM CT), 18:00 UTC (1:00 PM CT), and 21:00 UTC (4:00 PM CT)
+    - cron: '0 9,18,21 * * *'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
-    # NEW: Grants GitHub permission to push the DB file back to your repo
-    permissions:
-      contents: write 
 
     steps:
       - name: Checkout code
@@ -37,9 +33,3 @@ jobs:
         run: |
           python src/scraper.py
           python src/results_tracker.py
-
-      - name: Commit and push updated database
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "Auto-update MLB SQLite database"
-          file_pattern: mlb_historical_data.db
