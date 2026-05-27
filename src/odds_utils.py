@@ -1,6 +1,6 @@
 import os, requests, pytz
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 import db_manager
 
 load_dotenv(override=True)
@@ -18,13 +18,18 @@ TEAM_MAP = {
 def get_mlb_odds():
     api_key = os.getenv("ODDS_API_KEY")
     url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
-    params = {'apiKey': api_key, 'regions': 'us', 'markets': 'h2h,totals,spreads', 'bookmakers': 'draftkings', 'oddsFormat': 'american'}
+    params = {
+        'apiKey': api_key, 
+        'regions': 'us', 
+        'markets': 'h2h,totals,spreads', 
+        'bookmakers': 'draftkings', 
+        'oddsFormat': 'american'
+    }
     
     try:
         data = session.get(url, params=params).json()
         odds_dict = {}
         
-        # Get current times for filtering
         now_utc = datetime.now(pytz.utc)
         today_ct_str = now_utc.astimezone(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
         
@@ -33,12 +38,12 @@ def get_mlb_odds():
             comm_ct = comm_utc.astimezone(pytz.timezone('US/Central'))
             date_str = comm_ct.strftime('%Y-%m-%d')
             
-            # THE FIX: Strict Date & Time Filtering
+            # Strict lockout: Discard mismatched dates and games that went live more than 5 minutes ago
             if date_str != today_ct_str:
-                continue # Skip tomorrow's games (e.g., the Red Sox)
+                continue 
                 
-            if comm_utc < now_utc:
-                continue # Skip games that have already started today
+            if now_utc > (comm_utc + timedelta(minutes=5)):
+                continue 
                 
             home = TEAM_MAP.get(game['home_team'], game['home_team'])
             away = TEAM_MAP.get(game['away_team'], game['away_team'])
@@ -65,7 +70,11 @@ def get_mlb_odds():
                         odds_data['total'] = point
                         odds_data['ou_total'] = point
                     elif market['key'] == 'spreads':
-                        for o in market['outcomes']:
+                        # Final transformation: Lock onto the standard +/- 1.5 runline to reject wild alternate spreads
+                        standard_outcomes = [o for o in market['outcomes'] if abs(float(o.get('point', 0))) == 1.5]
+                        target_outcomes = standard_outcomes if standard_outcomes else market['outcomes']
+                        
+                        for o in target_outcomes:
                             if TEAM_MAP.get(o['name'], o['name']) == home:
                                 odds_data['rl_home_point'] = o.get('point', "N/A")
                                 odds_data['rl_home_price'] = o.get('price', "N/A")

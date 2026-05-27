@@ -1,72 +1,63 @@
 import pandas as pd
-from pybaseball import statcast_pitcher_expected_stats
+import requests
+import io
 import re
 import warnings
+from pybaseball import statcast_pitcher_expected_stats, pitching_stats
 
-# Suppress pybaseball warnings for a clean console
 warnings.filterwarnings('ignore')
 
-# Cache to prevent hitting the API repeatedly during the same scraper run
 _pitcher_cache = None
+_pitcher_batted_ball_cache = None
 
 def _normalize_name(name):
-    """Cleans names to ensure 'Kevin Gausman' matches 'Gausman, Kevin'"""
-    if not name or pd.isna(name):
-        return ""
-    # Remove punctuation and lowercase
+    if not name or pd.isna(name): return ""
     name = re.sub(r'[^\w\s]', '', name.lower())
-    # Split the name and sort alphabetically
     parts = name.split()
     return "".join(sorted(parts))
 
 def load_statcast_data():
-    global _pitcher_cache
+    global _pitcher_cache, _pitcher_batted_ball_cache
+    
+    # 1. Fetch Savant Data
     if _pitcher_cache is None:
-        print("📊 Fetching fresh Expected Stats (xERA) from Baseball Savant...")
+        print("📊 Fetching fresh Expected Stats (xERA)...")
         try:
-            # 2026 Season, minimum 50 batters faced
             df = statcast_pitcher_expected_stats(2026, 50)
-            
-            # --- THE FIX: Updated to handle PyBaseball's new 2026 column names ---
-            if 'last_name, first_name' in df.columns:
-                df['match_name'] = df['last_name, first_name'].astype(str)
-            elif 'first_name' in df.columns and 'last_name' in df.columns:
-                df['match_name'] = df['first_name'].astype(str) + " " + df['last_name'].astype(str)
-            elif 'player_name' in df.columns:
-                df['match_name'] = df['player_name'].astype(str)
-            else:
-                print(f"⚠️ PyBaseball Columns changed. Available columns: {list(df.columns)}")
-                _pitcher_cache = pd.DataFrame()
-                return
-
-            df['match_name'] = df['match_name'].apply(_normalize_name)
+            df['match_name'] = df.get('player_name', df.get('last_name, first_name', '')).astype(str).apply(_normalize_name)
             _pitcher_cache = df
-            print("✅ Statcast xStats loaded successfully.")
+        except: _pitcher_cache = pd.DataFrame()
+
+    # 2. Fetch FanGraphs Data with Fail-Safe
+    if _pitcher_batted_ball_cache is None:
+        print("📊 Fetching fresh GB% from FanGraphs...")
+        try:
+            # Browser spoofing to avoid 403 Forbidden
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'}
+            url = "https://www.fangraphs.com/leaders.aspx?pos=all&stats=pit&lg=all&qual=10&type=2&season=2026&month=0&season1=2026&ind=0&team=0,ts&rost=0&age=0&filter=&players=0&sort=23,d"
+            response = requests.get(url, headers=headers)
+            dfs = pd.read_html(io.StringIO(response.text))
+            fg_df = dfs[16]
+            fg_df['match_name'] = fg_df['Name'].apply(_normalize_name)
+            _pitcher_batted_ball_cache = fg_df
+            print("✅ FanGraphs GB% loaded successfully.")
         except Exception as e:
-            print(f"⚠️ Could not fetch Statcast data: {e}")
-            _pitcher_cache = pd.DataFrame()
+            print(f"⚠️ FanGraphs Access Denied: {e}. Defaulting to 0.43.")
+            _pitcher_batted_ball_cache = pd.DataFrame()
+
+def get_pitcher_gb_pct(pitcher_name):
+    load_statcast_data()
+    league_avg = 0.43
+    if _pitcher_batted_ball_cache is None or _pitcher_batted_ball_cache.empty: return league_avg
+    match = _pitcher_batted_ball_cache[_pitcher_batted_ball_cache['match_name'] == _normalize_name(pitcher_name)]
+    if not match.empty:
+        val = match.iloc[0].get('GB%', league_avg)
+        try: return float(str(val).replace('%', '')) / 100.0 if '%' in str(val) else float(val)
+        except: return league_avg
+    return league_avg
 
 def get_pitcher_xera(pitcher_name):
-    """Returns the xERA for a given pitcher, or None if not found."""
-    # This will use the cache if already loaded
     load_statcast_data()
-    
-    if _pitcher_cache is None or _pitcher_cache.empty or not pitcher_name:
-        return None
-        
-    clean_target = _normalize_name(pitcher_name)
-    match = _pitcher_cache[_pitcher_cache['match_name'] == clean_target]
-    
-    if not match.empty:
-        # --- THE FIX: Updated 'est_era' to 'xera' based on the API output ---
-        return match.iloc[0].get('xera', None)
-    
-    return None
-
-def get_lineup_xba(team_name):
-    """Placeholder for daily lineup xBA."""
-    return None
-
-def get_lineup_xslg(team_name):
-    """Placeholder for daily lineup xSLG."""
-    return None
+    if _pitcher_cache is None or _pitcher_cache.empty: return None
+    match = _pitcher_cache[_pitcher_cache['match_name'] == _normalize_name(pitcher_name)]
+    return match.iloc[0].get('xera') if not match.empty else None

@@ -81,25 +81,26 @@ def update_master_results():
             # --- DATABASE UPDATE: Save the final target scores for Machine Learning ---
             db_manager.update_final_score(game_data["db_id"], actual_home, actual_away, "FINAL")
             
-            t_pick = str(row.get('Total Pick', 'PASS')).upper()
-            m_pick = str(row.get('ML Pick', 'PASS')).upper()
-            s_pick = str(row.get('Spread Pick', 'PASS')).upper()
+            t_pick = str(row.get('Total Pick', 'PASS')).strip().upper()
+            m_pick = str(row.get('ML Pick', 'PASS')).strip().upper()
+            s_pick = str(row.get('Spread Pick', 'PASS')).strip().upper()
             
             results_str = []
             
-            if "OVER" in t_pick or "UNDER" in t_pick:
-                try:
-                    line = float(row.get('O/U Total'))
-                    if actual_total == line: results_str.append("T: PUSH")
-                    elif "OVER" in t_pick: results_str.append("T: WIN" if actual_total > line else "T: LOSS")
-                    elif "UNDER" in t_pick: results_str.append("T: WIN" if actual_total < line else "T: LOSS")
-                except: pass
+            if t_pick not in ["PASS", ""]:
+                if "OVER" in t_pick or "UNDER" in t_pick:
+                    try:
+                        line = float(row.get('O/U Total'))
+                        if actual_total == line: results_str.append("T: PUSH")
+                        elif "OVER" in t_pick: results_str.append("T: WIN" if actual_total > line else "T: LOSS")
+                        elif "UNDER" in t_pick: results_str.append("T: WIN" if actual_total < line else "T: LOSS")
+                    except: pass
 
-            if m_pick != "PASS":
+            if m_pick not in ["PASS", ""]:
                 if "HOME" in m_pick: results_str.append("ML: WIN" if actual_home > actual_away else "ML: LOSS")
                 elif "AWAY" in m_pick: results_str.append("ML: WIN" if actual_away > actual_home else "ML: LOSS")
 
-            if s_pick != "PASS":
+            if s_pick not in ["PASS", ""]:
                 try:
                     spread_val = float(s_pick.split()[1])
                     if "HOME" in s_pick:
