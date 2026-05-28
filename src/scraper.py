@@ -34,9 +34,13 @@ def calculate_wind_impact(home_team, wind_deg, wind_speed):
 def process_single_game(game, odds_data, today):
     home, away = game['teams']['home']['team']['name'], game['teams']['away']['team']['name']
     h_id, a_id = game['teams']['home']['team']['id'], game['teams']['away']['team']['id']
-    hp_name, ap_name = game['teams']['home']['probablePitcher'].get('fullName', 'TBD'), game['teams']['away']['probablePitcher'].get('fullName', 'TBD')
     
-    # Physics Calculation
+    hp_data = game['teams']['home'].get('probablePitcher', {})
+    ap_data = game['teams']['away'].get('probablePitcher', {})
+    
+    hp_name, ap_name = hp_data.get('fullName', 'TBD'), ap_data.get('fullName', 'TBD')
+    hp_id, ap_id = hp_data.get('id', None), ap_data.get('id', None)
+    
     weather = get_stadium_weather(home, game.get('gameDate'), 'Open')
     temp = float(weather['temp']) if weather and weather['temp'] != "N/A" else 72.0
     w_sp = float(weather['wind_speed']) if weather and weather['wind_speed'] != "N/A" else 0
@@ -47,7 +51,8 @@ def process_single_game(game, odds_data, today):
     hp_wind = 1.0 + ((w_sp - 5) * 0.006 * ((1.0 - hp_gb) / 0.57)) if wind_impact == "OUT" else 1.0
     ap_wind = 1.0 + ((w_sp - 5) * 0.006 * ((1.0 - ap_gb) / 0.57)) if wind_impact == "OUT" else 1.0
     
-    hp_m, ap_m = get_pitcher_metrics(game['teams']['home']['probablePitcher'].get('id')), get_pitcher_metrics(game['teams']['away']['probablePitcher'].get('id'))
+    hp_m = get_pitcher_metrics(hp_id) if hp_id else {'score': 0}
+    ap_m = get_pitcher_metrics(ap_id) if ap_id else {'score': 0}
     h_bp, a_bp = get_bullpen_metrics(h_id), get_bullpen_metrics(a_id)
     h_f, a_f = get_bullpen_fatigue(h_id), get_bullpen_fatigue(a_id)
     h_mult, a_mult = get_lineup_multiplier(h_id, a_id), get_lineup_multiplier(a_id, h_id)
@@ -61,8 +66,7 @@ def process_single_game(game, odds_data, today):
     
     odds = odds_data.get(f"{today}_{home}_{away}", {})
     
-    # Pick Logic
-    total_pick, ml_pick, total_stars = "PASS", "PASS", 0
+    total_pick, total_stars = "PASS", 0
     if odds.get('total') and odds.get('total') != "N/A":
         line = float(odds.get('total'))
         edge = abs((exp_home + exp_away) - line)
@@ -87,7 +91,7 @@ def process_single_game(game, odds_data, today):
     
     row = [today, home, away, hp_name, ap_name, odds.get('ml_home'), odds.get('ml_away'), odds.get('spread'), odds.get('total'), 
            exp_home, exp_away, round(exp_home + exp_away, 2), hp_m['score'], ap_m['score'], h_bp['bp_score'], a_bp['bp_score'], 
-           h_f, a_f, temp, w_sp, weather.get('wind_dir'), "", total_pick, ml_pick, "PASS", total_stars, "", ""]
+           h_f, a_f, temp, w_sp, weather.get('wind_dir'), "", total_pick, "PASS", "PASS", total_stars, "", ""]
     return row, db_data
 
 def run_scraper():

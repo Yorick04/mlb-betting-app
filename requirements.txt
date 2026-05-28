@@ -7,3 +7,4 @@ oauth2client
 scikit-learn
 xgboost
 pytz
+html5lib

@@ -7,13 +7,14 @@ import pytz
 def run_daily_predictions():
     print("--- 🤖 MLB AI Daily Predictor ---")
     
-    # 1. Load the trained AI model and scaler
+    # 1. Load BOTH trained AI models and the scaler
     try:
-        model = joblib.load('mlb_model.pkl')
+        model_ml = joblib.load('mlb_ml_model.pkl')
+        model_ou = joblib.load('mlb_ou_model.pkl')
         scaler = joblib.load('scaler.pkl')
-        print("✅ Successfully loaded AI Model and Scaler.")
+        print("✅ Successfully loaded ML Model, OU Model, and Scaler.")
     except FileNotFoundError:
-        print("❌ Error: Could not find 'mlb_model.pkl' or 'scaler.pkl'.")
+        print("❌ Error: Could not find the required .pkl files.")
         print("Make sure you have run your ai_training.py script first!")
         return
 
@@ -41,36 +42,21 @@ def run_daily_predictions():
         'temp', 'park_factor', 'umpire_multiplier'
     ]
     
-    # Impute missing values with the exact same baselines used in training
-    fill_values = {
-        'temp': 72.0, 
-        'park_factor': 100.0, 
-        'umpire_multiplier': 1.0,
-        'home_fatigue': 0.0, 
-        'away_fatigue': 0.0,
-        'home_lineup_mult': 1.0, 
-        'away_lineup_mult': 1.0,
-        'home_sp_score': 4.50, 
-        'away_sp_score': 4.50,
-        'home_bp_score': 4.50, 
-        'away_bp_score': 4.50
-    }
+    # Handle missing values to prevent scaler crashes
+    df[features] = df[features].fillna(df[features].mean())
     
-    # Apply fill values and isolate the features
-    df_features = df[features].fillna(value=fill_values)
+    X = df[features]
+    X_scaled = scaler.transform(X)
 
-    # 4. Scale and Predict
-    X_scaled = scaler.transform(df_features)
-    predictions = model.predict(X_scaled)
-    
-    # Add predictions back to the dataframe
-    df['ai_projected_diff'] = predictions
+    # 4. Generate Predictions for BOTH targets
+    df['ai_projected_diff'] = model_ml.predict(X_scaled)
+    df['ai_projected_total'] = model_ou.predict(X_scaled)
 
     # 5. Display the results
-    print("="*50)
-    print("🏟️ TODAY'S AI PREDICTIONS (Run Differential)")
-    print("Positive Diff = Home Team Favored | Negative Diff = Away Team Favored")
-    print("="*50)
+    print("="*65)
+    print("🏟️ TODAY'S AI PREDICTIONS (Moneyline & Totals)")
+    print("Positive ML = Home Team Favored | Negative ML = Away Team Favored")
+    print("="*65)
 
     # Sort by the most lopsided games first (highest absolute run diff)
     df_sorted = df.reindex(df['ai_projected_diff'].abs().sort_values(ascending=False).index)
@@ -78,8 +64,9 @@ def run_daily_predictions():
     for index, row in df_sorted.iterrows():
         matchup = f"{row['away_team']} @ {row['home_team']}"
         predicted_diff = row['ai_projected_diff']
+        predicted_total = row['ai_projected_total']
         
-        # Determine who the AI picks
+        # Determine who the AI picks for Moneyline
         if predicted_diff > 0:
             pick = f"🏠 HOME ({row['home_team']})"
             margin = predicted_diff
@@ -89,16 +76,16 @@ def run_daily_predictions():
             
         # Format the output
         print(f"\n{matchup}")
-        print(f"   AI Pick: {pick} by {margin:.2f} runs")
+        print(f"   ML Pick: {pick} by {margin:.2f} runs")
+        print(f"   OU Pick: Projected Total Runs: {predicted_total:.2f}")
         
-        # Compare to the DraftKings Moneyline if we have it
+        # Compare to the DraftKings odds if we have them
         ml_home = row.get('ml_home', 'N/A')
         ml_away = row.get('ml_away', 'N/A')
+        ou_total = row.get('ou_total', 'N/A')
+        spread = row.get('spread', 'N/A')
         
-        if pd.notna(ml_home) and pd.notna(ml_away) and ml_home != 'N/A':
-            print(f"   DraftKings ML: {row['home_team']} ({ml_home}) | {row['away_team']} ({ml_away})")
-        else:
-            print("   DraftKings ML: Odds not pulled yet.")
+        print(f"   Odds   : ML (H: {ml_home} | A: {ml_away}) | O/U: {ou_total} | Spread: {spread}")
 
 if __name__ == "__main__":
     run_daily_predictions()

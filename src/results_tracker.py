@@ -2,7 +2,7 @@ import os, requests, pytz, time, json, gspread
 from datetime import datetime
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
-import db_manager # <-- IMPORT THE NEW DATABASE MANAGER
+import db_manager
 
 load_dotenv(override=True)
 session = requests.Session()
@@ -21,15 +21,26 @@ def update_master_results():
     today_str = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
     dates_to_check = set()
     
+    # 1. Check Google Sheet for missing grades
     for row in all_rows:
         row_date = str(row.get('Date (CT)', ''))
         if row_date and row_date <= today_str and str(row.get('Result', '')).strip() == "":
             dates_to_check.add(row_date)
 
+    # 2. Check Database for missing grades (Decoupled from the Sheet)
+    conn = db_manager.get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT game_date FROM game_logs WHERE status = 'PENDING' AND game_date <= ?", (today_str,))
+    db_pending = cursor.fetchall()
+    for (d,) in db_pending:
+        dates_to_check.add(d)
+    conn.close()
+
     if not dates_to_check:
-        print("No pending games to grade.")
+        print("No pending games to grade in Sheet or DB.")
         return
 
+    # 3. Fetch Data from MLB API
     scores = {}
     for d in dates_to_check:
         url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={d}"
@@ -42,7 +53,7 @@ def update_master_results():
                     home_team = g['teams']['home']['team']['name']
                     away_team = g['teams']['away']['team']['name']
                     matchup = f"{away_team}@{home_team}"
-                    db_game_id = f"{d}_{home_team}_{away_team}" # Used to match our SQLite ID
+                    db_game_id = f"{d}_{home_team}_{away_team}" 
                     
                     if status == 'Final':
                         scores[f"{d}_{matchup}"] = {
@@ -54,32 +65,41 @@ def update_master_results():
                         }
                     elif detail in ["Postponed", "Cancelled"]:
                         scores[f"{d}_{matchup}"] = {"status": "PPD", "db_id": db_game_id}
-        except: continue
+        except Exception as e: 
+            print(f"Error fetching date {d}: {e}")
+            continue
 
+    # 4. DATABASE UPDATE: Grade the DB immediately
+    db_updates = 0
+    for key, game_data in scores.items():
+        if game_data["status"] == "PPD":
+            db_manager.update_final_score(game_data["db_id"], None, None, "PPD")
+            db_updates += 1
+        elif game_data["status"] == "FINAL":
+            db_manager.update_final_score(game_data["db_id"], game_data["home_score"], game_data["away_score"], "FINAL")
+            db_updates += 1
+            
+    if db_updates > 0:
+        print(f"✅ SQLite Database updated with {db_updates} finalized games.")
+
+    # 5. GOOGLE SHEET UPDATE: Grade the Sheet only where missing
     cells_to_update = []
-
     for i, row in enumerate(all_rows, start=2):
         row_date = str(row.get('Date (CT)', ''))
         matchup = f"{row.get('Away')}@{row.get('Home')}"
         score_key = f"{row_date}_{matchup}"
         
+        # Only update the sheet if the cell is completely blank
         if str(row.get('Result', '')).strip() == "" and score_key in scores:
             game_data = scores[score_key]
             
             if game_data["status"] == "PPD":
-                # Update Google Sheets
                 cells_to_update.append(gspread.Cell(row=i, col=27, value="PPD"))
                 cells_to_update.append(gspread.Cell(row=i, col=28, value="POSTPONED"))
-                
-                # Update SQLite Database
-                db_manager.update_final_score(game_data["db_id"], None, None, "PPD")
                 continue
                 
             actual_home, actual_away, actual_total = game_data["home_score"], game_data["away_score"], game_data["total"]
             formatted_actual = f"H: {actual_home} | A: {actual_away} | T: {actual_total}"
-            
-            # --- DATABASE UPDATE: Save the final target scores for Machine Learning ---
-            db_manager.update_final_score(game_data["db_id"], actual_home, actual_away, "FINAL")
             
             t_pick = str(row.get('Total Pick', 'PASS')).strip().upper()
             m_pick = str(row.get('ML Pick', 'PASS')).strip().upper()
@@ -117,11 +137,11 @@ def update_master_results():
 
             cells_to_update.append(gspread.Cell(row=i, col=27, value=formatted_actual))
             cells_to_update.append(gspread.Cell(row=i, col=28, value=final_res))
-            print(f"Graded Row {i}: {matchup} -> {final_res} (Saved to DB)")
+            print(f"Graded Sheet Row {i}: {matchup} -> {final_res}")
 
     if cells_to_update:
         sheet.update_cells(cells_to_update)
-        print(f"Batch updated {len(cells_to_update)} cells successfully.")
+        print(f"Batch updated {len(cells_to_update)} Sheet cells successfully.")
 
 if __name__ == "__main__":
     update_master_results()
