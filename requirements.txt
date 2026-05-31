@@ -8,3 +8,4 @@ scikit-learn
 xgboost
 pytz
 html5lib
+joblib

@@ -3,6 +3,8 @@ from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import requests
+
+# Custom Modules
 import statcast_utils, db_manager
 from odds_utils import get_mlb_odds
 from weather_utils import get_stadium_weather
@@ -19,98 +21,211 @@ def get_google_sheet_client():
     creds_info = json.loads(os.getenv("GOOGLE_SHEETS_JSON"))
     return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
 
-def check_headers(sheet):
-    headers = ["Date (CT)", "Home", "Away", "Home Pitcher", "Away Pitcher", "H ML", "A ML", "Spread", "O/U Total", "Exp Home Runs", "Exp Away Runs", "Proj Total", "Home SP Score", "Away SP Score", "Home BP Score", "Away BP Score", "Home Fatigue", "Away Fatigue", "Temp", "Wind", "Wind Dir", "Alerts", "Total Pick", "ML Pick", "Spread Pick", "Cumulative Stars", "Actual Score", "Result"]
-    try: sheet.row_values(1)
-    except: sheet.update(values=[headers], range_name='A1:AB1')
-
-def calculate_wind_impact(home_team, wind_deg, wind_speed):
-    if wind_deg == "N/A" or home_team not in STADIUM_ORIENTATION: return "Neutral"
-    st_angle = STADIUM_ORIENTATION.get(home_team, 0)
-    diff = abs(wind_deg - st_angle) % 360
-    if diff > 180: diff = 360 - diff
-    return "OUT" if (diff < 45 or diff > 315) and wind_speed > 10 else "Neutral"
-
-def process_single_game(game, odds_data, today):
-    home, away = game['teams']['home']['team']['name'], game['teams']['away']['team']['name']
-    h_id, a_id = game['teams']['home']['team']['id'], game['teams']['away']['team']['id']
-    
-    hp_data = game['teams']['home'].get('probablePitcher', {})
-    ap_data = game['teams']['away'].get('probablePitcher', {})
-    
-    hp_name, ap_name = hp_data.get('fullName', 'TBD'), ap_data.get('fullName', 'TBD')
-    hp_id, ap_id = hp_data.get('id', None), ap_data.get('id', None)
-    
-    weather = get_stadium_weather(home, game.get('gameDate'), 'Open')
-    temp = float(weather['temp']) if weather and weather['temp'] != "N/A" else 72.0
-    w_sp = float(weather['wind_speed']) if weather and weather['wind_speed'] != "N/A" else 0
-    w_deg = weather['wind_deg'] if weather and weather['wind_deg'] != "N/A" else 0
-    
-    wind_impact = calculate_wind_impact(home, w_deg, w_sp)
-    hp_gb, ap_gb = statcast_utils.get_pitcher_gb_pct(hp_name), statcast_utils.get_pitcher_gb_pct(ap_name)
-    hp_wind = 1.0 + ((w_sp - 5) * 0.006 * ((1.0 - hp_gb) / 0.57)) if wind_impact == "OUT" else 1.0
-    ap_wind = 1.0 + ((w_sp - 5) * 0.006 * ((1.0 - ap_gb) / 0.57)) if wind_impact == "OUT" else 1.0
-    
-    hp_m = get_pitcher_metrics(hp_id) if hp_id else {'score': 0}
-    ap_m = get_pitcher_metrics(ap_id) if ap_id else {'score': 0}
-    h_bp, a_bp = get_bullpen_metrics(h_id), get_bullpen_metrics(a_id)
-    h_f, a_f = get_bullpen_fatigue(h_id), get_bullpen_fatigue(a_id)
-    h_mult, a_mult = get_lineup_multiplier(h_id, a_id), get_lineup_multiplier(a_id, h_id)
-    
-    park_f = PARK_FACTORS.get(home, 100)
-    ump_m = get_umpire_multiplier(next((o['official']['fullName'] for o in game.get('officials', []) if o['officialType'] == 'Home Plate'), "Unknown"))
-    
-    env_m = (park_f / 100.0) * (1.0 + (temp - 72) * 0.0015) * ump_m
-    exp_home = round((((ap_m['score'] * 0.66) + (a_bp['bp_score'] * 0.33) + h_f) * h_mult) * (env_m * ap_wind), 2)
-    exp_away = round((((hp_m['score'] * 0.66) + (h_bp['bp_score'] * 0.33) + a_f) * a_mult) * (env_m * hp_wind), 2)
-    
-    odds = odds_data.get(f"{today}_{home}_{away}", {})
-    
-    total_pick, total_stars = "PASS", 0
-    if odds.get('total') and odds.get('total') != "N/A":
-        line = float(odds.get('total'))
-        edge = abs((exp_home + exp_away) - line)
-        if edge >= 0.75:
-            stars = "★★★" if edge >= 2.0 else "★★" if edge >= 1.25 else "★"
-            total_stars = len(stars)
-            total_pick = f"{'OVER' if (exp_home+exp_away) > line else 'UNDER'} {line} | {stars}"
-            
-    db_data = {
-        "game_id": f"{today}_{home}_{away}", "game_date": today, "home_team": home, "away_team": away,
-        "home_pitcher": hp_name, "away_pitcher": ap_name,
-        "home_sp_score": hp_m['score'], "away_sp_score": ap_m['score'],
-        "home_bp_score": h_bp['bp_score'], "away_bp_score": a_bp['bp_score'],
-        "home_fatigue": h_f, "away_fatigue": a_f,
-        "home_lineup_mult": h_mult, "away_lineup_mult": a_mult,
-        "park_factor": park_f, "umpire_multiplier": ump_m,
-        "temp": temp, "wind_speed": w_sp, "wind_dir": weather.get('wind_dir'),
-        "ml_home": odds.get('ml_home'), "ml_away": odds.get('ml_away'),
-        "spread": odds.get('spread'), "ou_total": odds.get('total'),
-        "projected_home_runs": exp_home, "projected_away_runs": exp_away
-    }
-    
-    row = [today, home, away, hp_name, ap_name, odds.get('ml_home'), odds.get('ml_away'), odds.get('spread'), odds.get('total'), 
-           exp_home, exp_away, round(exp_home + exp_away, 2), hp_m['score'], ap_m['score'], h_bp['bp_score'], a_bp['bp_score'], 
-           h_f, a_f, temp, w_sp, weather.get('wind_dir'), "", total_pick, "PASS", "PASS", total_stars, "", ""]
-    return row, db_data
-
 def run_scraper():
-    client = get_google_sheet_client()
-    sheet = client.open("mlb-betting-app").worksheet("Master")
-    check_headers(sheet)
-    today = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
+    print("--- ⚾ Starting Daily MLB Scraper ---")
+    
+    # 1. Initialize Database
+    db_conn = db_manager.get_connection()
+    db_cursor = db_conn.cursor()
+    
+    # 2. Fetch Third-Party Data
+    print("Fetching live DraftKings odds...")
     odds = get_mlb_odds()
+    
     statcast_utils.load_statcast_data()
     
-    games = requests.get(f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}&hydrate=probablePitcher,officials,weather").json().get('dates', [{}])[0].get('games', [])
-    row_map = {f"{r[0]}_{r[1]}_{r[2]}": i + 1 for i, r in enumerate(sheet.get_all_values()) if len(r) >= 3}
+    # 3. Get Today's Schedule
+    today = datetime.now(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}&hydrate=probablePitcher,officials,weather"
     
-    for game in games:
-        row, db = process_single_game(game, odds, today)
-        db_manager.upsert_game(db)
-        key = f"{row[0]}_{row[1]}_{row[2]}"
-        if key in row_map: sheet.update(values=[row[:26]], range_name=f"A{row_map[key]}:Z{row_map[key]}")
-        else: sheet.append_row(row)
+    print(f"Fetching MLB Schedule for {today}...")
+    try:
+        resp = requests.get(url, timeout=15).json()
+        games = resp.get('dates', [{}])[0].get('games', [])
+    except Exception as e:
+        print(f"❌ Failed to fetch MLB schedule: {e}")
+        return
+        
+    if not games:
+        print("⚾ No games found for today.")
+        return
+
+    # 4. Connect to Google Sheets
+    try:
+        client = get_google_sheet_client()
+        sheet = client.open("mlb-betting-app").worksheet("Master")
+        existing_rows = sheet.get_all_records()
+    except Exception as e:
+        print(f"⚠️ Google Sheets connection failed (Data will still save to DB): {e}")
+        existing_rows = []
+        sheet = None
+        
+    rows_to_insert = []
+    cells_to_update = [] # Holds updates for games that already exist on the sheet
+    
+    # 5. Process Each Game
+    for g in games:
+        status = g['status']['abstractGameState']
+        if status == 'Final':
+            continue  
+            
+        home_team = g['teams']['home']['team']['name']
+        away_team = g['teams']['away']['team']['name']
+        home_id = g['teams']['home']['team']['id']
+        away_id = g['teams']['away']['team']['id']
+        
+        print(f"\nProcessing: {away_team} @ {home_team}")
+        
+        db_game_id = f"{today}_{home_team}_{away_team}"
+        
+        # --- Pitcher Logic ---
+        hp_id = g['teams']['home'].get('probablePitcher', {}).get('id', "TBD")
+        ap_id = g['teams']['away'].get('probablePitcher', {}).get('id', "TBD")
+        hp_name = g['teams']['home'].get('probablePitcher', {}).get('fullName', "TBD")
+        ap_name = g['teams']['away'].get('probablePitcher', {}).get('fullName', "TBD")
+        
+        hp_metrics = get_pitcher_metrics(hp_id)
+        ap_metrics = get_pitcher_metrics(ap_id)
+        
+        hp_xera = statcast_utils.get_pitcher_xera(hp_name)
+        ap_xera = statcast_utils.get_pitcher_xera(ap_name)
+        hp_score = hp_xera if hp_xera else hp_metrics.get('score', 4.50)
+        ap_score = ap_xera if ap_xera else ap_metrics.get('score', 4.50)
+        
+        # --- Bullpen & Lineup Logic ---
+        h_bp = get_bullpen_metrics(home_id)
+        a_bp = get_bullpen_metrics(away_id)
+        
+        h_f = get_bullpen_fatigue(home_id)
+        a_f = get_bullpen_fatigue(away_id)
+        
+        h_lineup = get_lineup_multiplier(home_id, ap_id)
+        a_lineup = get_lineup_multiplier(away_id, hp_id)
+        
+        # --- Weather & Environment ---
+        roof = g.get('weather', {}).get('condition', "Open")
+        weather = get_stadium_weather(home_team, roof_status=roof)
+        temp = weather.get('temp', 72)
+        wind_sp = weather.get('wind_speed', 0)
+        wind_dir = weather.get('wind_dir', "N/A")
+        
+        park_factor = PARK_FACTORS.get(home_team, 100)
+        
+        # --- Umpire Logic ---
+        umpire_name = "TBD"
+        for off in g.get('officials', []):
+            if off.get('officialType') == 'Home Plate':
+                umpire_name = off.get('official', {}).get('fullName')
+                break
+        ump_mult = get_umpire_multiplier(umpire_name)
+        
+        # ---------------------------------------------------------
+        # 🛡️ THE ODDS MEMORY PATCH 🛡️
+        # ---------------------------------------------------------
+        game_odds = odds.get(f"{home_team}_{away_team}", {})
+        ml_home = game_odds.get('ml_home')
+        ml_away = game_odds.get('ml_away')
+        spread = game_odds.get('spread')
+        ou_total = game_odds.get('ou_total')
+
+        # If The Odds API dropped the game (because it started or wasn't posted), rescue our morning odds from SQLite
+        if ml_home is None or ml_home == "N/A" or ou_total is None or ou_total == "N/A":
+            db_cursor.execute("SELECT ml_home, ml_away, spread, ou_total FROM game_logs WHERE game_id = ?", (db_game_id,))
+            saved = db_cursor.fetchone()
+            
+            if saved and saved[0] is not None and str(saved[0]) != "N/A":
+                ml_home, ml_away, spread, ou_total = saved
+                print(f"   🔄 Rescued morning odds for {home_team} from database.")
+                
+        ml_home = ml_home if ml_home is not None else "N/A"
+        ml_away = ml_away if ml_away is not None else "N/A"
+        spread = spread if spread is not None else "N/A"
+        ou_total = ou_total if ou_total is not None else "N/A"
+        # ---------------------------------------------------------
+
+        # --- 6. Save to SQLite Database ---
+        clean_data = {
+            "game_id": db_game_id, "game_date": today, "home_team": home_team, "away_team": away_team,
+            "home_pitcher": hp_name, "away_pitcher": ap_name, "home_sp_score": hp_score, "away_sp_score": ap_score,
+            "home_bp_score": h_bp.get('bp_score', 4.50), "away_bp_score": a_bp.get('bp_score', 4.50),
+            "home_fatigue": h_f, "away_fatigue": a_f, "home_lineup_mult": h_lineup, "away_lineup_mult": a_lineup,
+            "temp": temp, "wind_speed": wind_sp, "wind_dir": wind_dir, "park_factor": park_factor, "umpire_multiplier": ump_mult,
+            "ml_home": ml_home, "ml_away": ml_away, "spread": spread, "ou_total": ou_total,
+            "projected_home_runs": 0.0, "projected_away_runs": 0.0
+        }
+
+        # Use COALESCE to ensure we never overwrite good odds with N/A on a second run
+        sql = '''
+        INSERT INTO game_logs (
+            game_id, game_date, home_team, away_team, home_pitcher, away_pitcher,
+            home_sp_score, away_sp_score, home_bp_score, away_bp_score, home_fatigue, away_fatigue,
+            home_lineup_mult, away_lineup_mult, temp, wind_speed, wind_dir, park_factor, umpire_multiplier,
+            ml_home, ml_away, spread, ou_total, projected_home_runs, projected_away_runs, status
+        ) VALUES (
+            :game_id, :game_date, :home_team, :away_team, :home_pitcher, :away_pitcher,
+            :home_sp_score, :away_sp_score, :home_bp_score, :away_bp_score, :home_fatigue, :away_fatigue,
+            :home_lineup_mult, :away_lineup_mult, :temp, :wind_speed, :wind_dir, :park_factor, :umpire_multiplier,
+            :ml_home, :ml_away, :spread, :ou_total, :projected_home_runs, :projected_away_runs, 'PENDING'
+        )
+        ON CONFLICT(game_id) DO UPDATE SET
+            home_sp_score=excluded.home_sp_score, away_sp_score=excluded.away_sp_score,
+            home_bp_score=excluded.home_bp_score, away_bp_score=excluded.away_bp_score,
+            home_lineup_mult=excluded.home_lineup_mult, away_lineup_mult=excluded.away_lineup_mult,
+            ml_home=COALESCE(excluded.ml_home, game_logs.ml_home), ml_away=COALESCE(excluded.ml_away, game_logs.ml_away),
+            spread=COALESCE(excluded.spread, game_logs.spread), ou_total=COALESCE(excluded.ou_total, game_logs.ou_total),
+            temp=excluded.temp, wind_speed=excluded.wind_speed, wind_dir=excluded.wind_dir,
+            home_fatigue=excluded.home_fatigue, away_fatigue=excluded.away_fatigue, umpire_multiplier=excluded.umpire_multiplier;
+        '''
+        try:
+            db_cursor.execute(sql, clean_data)
+            db_conn.commit()
+        except Exception as e:
+            print(f"❌ Error saving to database: {e}")
+
+        # --- 7. Append OR Update Google Sheet ---
+        if sheet:
+            is_new = True
+            row_idx = None
+            for i, r in enumerate(existing_rows, start=2): # start=2 offsets header row
+                if r.get('Date (CT)') == today and r.get('Home') == home_team and r.get('Away') == away_team:
+                    is_new = False
+                    row_idx = i
+                    break
+                    
+            if is_new:
+                # Add entirely new row. Leave AI prediction columns as "N/A" and "PASS"
+                row = [
+                    today, home_team, away_team, hp_name, ap_name, ml_home, ml_away, spread, ou_total, 
+                    "N/A", "N/A", "N/A", round(hp_score, 2), round(ap_score, 2), 
+                    round(h_bp.get('bp_score', 4.5), 2), round(a_bp.get('bp_score', 4.5), 2), 
+                    round(h_f, 2), round(a_f, 2), temp, wind_sp, wind_dir, "", 
+                    "PASS", "PASS", "PASS", "", "", ""
+                ]
+                rows_to_insert.append(row)
+            else:
+                # UPDATE existing row with fresh odds and live weather
+                # Google Sheets columns: F=6(H ML), G=7(A ML), H=8(Spread), I=9(O/U)
+                cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=ml_home))
+                cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=ml_away))
+                cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=spread))
+                cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=ou_total))
+                
+                # Update live weather (Cols S=19, T=20, U=21)
+                cells_to_update.append(gspread.Cell(row=row_idx, col=19, value=temp))
+                cells_to_update.append(gspread.Cell(row=row_idx, col=20, value=wind_sp))
+                cells_to_update.append(gspread.Cell(row=row_idx, col=21, value=wind_dir))
+            
+    # Execute batch writes to Google Sheets
+    if sheet and rows_to_insert:
+        sheet.append_rows(rows_to_insert)
+        print(f"\n✅ Appended {len(rows_to_insert)} new games to Google Sheet.")
+        
+    if sheet and cells_to_update:
+        sheet.update_cells(cells_to_update)
+        print(f"\n✅ Updated Odds & Live Weather for {len(cells_to_update)//7} existing games in the Google Sheet.")
+        
+    db_conn.close()
+    print("--- ⚾ Scraper Complete ---")
 
 if __name__ == "__main__":
     run_scraper()

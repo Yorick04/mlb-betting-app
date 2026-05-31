@@ -2,16 +2,6 @@
 .env
 *.env
 
-# SQLite Database
-mlb_historical_data.db
-*.sqlite3
-*.db
-
-# Machine Learning Models
-*.pkl
-mlb_model.pkl
-scaler.pkl
-
 # Python Cache
 __pycache__/
 *.py[cod]
