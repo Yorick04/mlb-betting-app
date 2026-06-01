@@ -91,6 +91,9 @@ def run_scraper():
         ap_xera = statcast_utils.get_pitcher_xera(ap_name)
         hp_score = hp_xera if hp_xera else hp_metrics.get('score', 4.50)
         ap_score = ap_xera if ap_xera else ap_metrics.get('score', 4.50)
+        # Cap extreme small-sample outliers so they don't break the StandardScaler
+        hp_score = min(hp_score, 8.50)
+        ap_score = min(ap_score, 8.50)
         
         # --- Bullpen & Lineup Logic ---
         h_bp = get_bullpen_metrics(home_id)

@@ -1,4 +1,7 @@
-import os, requests, pytz
+import os
+import requests
+import pytz
+import json
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import db_manager
@@ -7,15 +10,30 @@ load_dotenv(override=True)
 
 session = requests.Session()
 
+# Expanded to ensure all 30 teams map perfectly, including both NY and Chicago teams
 TEAM_MAP = {
     "Oakland Athletics": "Athletics", "Sacramento Athletics": "Athletics", "Oakland A's": "Athletics",
     "St Louis Cardinals": "St. Louis Cardinals", "St. Louis Cardinals": "St. Louis Cardinals",
     "LA Dodgers": "Los Angeles Dodgers", "LA Angels": "Los Angeles Angels",
-    "NY Yankees": "New York Yankees", "NY Mets": "New York Mets",
-    "Arizona D-backs": "Arizona Diamondbacks", "Arizona Diamondbacks": "Arizona Diamondbacks"
+    "NY Yankees": "New York Yankees", "New York Yankees": "New York Yankees",
+    "NY Mets": "New York Mets", "New York Mets": "New York Mets",
+    "Chicago Cubs": "Chicago Cubs", "Chicago White Sox": "Chicago White Sox",
+    "Arizona D-backs": "Arizona Diamondbacks", "Arizona Diamondbacks": "Arizona Diamondbacks",
+    "Atlanta Braves": "Atlanta Braves"
 }
 
 def get_mlb_odds():
+    now_utc = datetime.now(pytz.utc)
+    today_ct_str = now_utc.astimezone(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
+    cache_filename = f"odds_cache_{today_ct_str}.json"
+
+    # --- 1. Caching Layer to Protect API Quota ---
+    if os.path.exists(cache_filename):
+        print(f"📦 Loading DraftKings odds from local cache: {cache_filename}")
+        with open(cache_filename, 'r') as file:
+            return json.load(file)
+
+    print("🌐 Fetching fresh odds from API...")
     api_key = os.getenv("ODDS_API_KEY")
     url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds"
     params = {
@@ -27,11 +45,17 @@ def get_mlb_odds():
     }
     
     try:
-        data = session.get(url, params=params).json()
-        odds_dict = {}
+        response = session.get(url, params=params)
         
-        now_utc = datetime.now(pytz.utc)
-        today_ct_str = now_utc.astimezone(pytz.timezone('US/Central')).strftime('%Y-%m-%d')
+        if response.status_code == 429:
+            print("❌ Rate limited by API (429). Out of pulls.")
+            return {}
+        elif response.status_code != 200:
+            print(f"❌ API Error: {response.status_code}")
+            return {}
+
+        data = response.json()
+        odds_dict = {}
         
         for game in data:
             comm_utc = datetime.strptime(game['commence_time'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
@@ -47,10 +71,13 @@ def get_mlb_odds():
                 
             home = TEAM_MAP.get(game['home_team'], game['home_team'])
             away = TEAM_MAP.get(game['away_team'], game['away_team'])
-            key = db_manager.generate_game_id(date_str, home, away)
+            
+            # --- 2. CRITICAL FIX: Match the scraper.py lookup key ---
+            key = f"{home}_{away}"
+            db_id = db_manager.generate_game_id(date_str, home, away)
             
             odds_data = {
-                'game_id': key,
+                'game_id': db_id,
                 'game_date': date_str,
                 'home_team': home,
                 'away_team': away,
@@ -84,7 +111,15 @@ def get_mlb_odds():
                                 odds_data['rl_away_price'] = o.get('price', "N/A")
 
             odds_dict[key] = odds_data
+        
+        # --- 3. Save parsed odds to cache file to protect quota ---
+        if odds_dict:
+            with open(cache_filename, 'w') as file:
+                json.dump(odds_dict, file)
+            print("✅ Odds successfully cached for today.")
+
         return odds_dict
+        
     except Exception as e:
         print(f"Error fetching odds: {e}")
         return {}

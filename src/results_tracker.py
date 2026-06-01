@@ -1,4 +1,4 @@
-import os, requests, pytz, time, json, gspread
+import os, requests, pytz, time, json, gspread, re
 from datetime import datetime
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
@@ -11,6 +11,21 @@ def get_google_sheet_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_info = json.loads(os.getenv("GOOGLE_SHEETS_JSON"))
     return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope))
+
+def extract_line(pick_str):
+    """
+    Safely extracts the numerical betting line directly from the pick string 
+    (e.g., "UNDER 9.5 | ★" -> 9.5, "HOME -1.5 | ★★" -> -1.5).
+    """
+    try:
+        # Isolate the pick part before the stars
+        base_pick = pick_str.split('|')[0]
+        match = re.search(r'[-+]?\d*\.\d+|\d+', base_pick)
+        if match:
+            return float(match.group())
+    except Exception:
+        pass
+    return None
 
 def update_master_results():
     print("--- Auditing Master Sheet & Database (Live Catch-Up) ---")
@@ -27,7 +42,7 @@ def update_master_results():
         if row_date and row_date <= today_str and str(row.get('Result', '')).strip() == "":
             dates_to_check.add(row_date)
 
-    # 2. Check Database for missing grades (Decoupled from the Sheet)
+    # 2. Check Database for missing grades
     conn = db_manager.get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT game_date FROM game_logs WHERE status = 'PENDING' AND game_date <= ?", (today_str,))
@@ -98,7 +113,9 @@ def update_master_results():
                 cells_to_update.append(gspread.Cell(row=i, col=28, value="POSTPONED"))
                 continue
                 
-            actual_home, actual_away, actual_total = game_data["home_score"], game_data["away_score"], game_data["total"]
+            actual_home = game_data["home_score"]
+            actual_away = game_data["away_score"]
+            actual_total = game_data["total"]
             formatted_actual = f"H: {actual_home} | A: {actual_away} | T: {actual_total}"
             
             t_pick = str(row.get('Total Pick', 'PASS')).strip().upper()
@@ -107,32 +124,50 @@ def update_master_results():
             
             results_str = []
             
-            if t_pick not in ["PASS", ""]:
-                if "OVER" in t_pick or "UNDER" in t_pick:
+            # --- GRADE TOTALS ---
+            if t_pick and "PASS" not in t_pick:
+                line = extract_line(t_pick)
+                
+                # Fallback to column lookup if regex fails
+                if line is None:
                     try:
-                        line = float(row.get('O/U Total'))
-                        if actual_total == line: results_str.append("T: PUSH")
-                        elif "OVER" in t_pick: results_str.append("T: WIN" if actual_total > line else "T: LOSS")
-                        elif "UNDER" in t_pick: results_str.append("T: WIN" if actual_total < line else "T: LOSS")
-                    except: pass
+                        line = float(row.get('O/U Total', 0))
+                    except:
+                        line = 0.0
+                        
+                if line > 0:
+                    if actual_total == line: 
+                        results_str.append("T: PUSH")
+                    elif "OVER" in t_pick: 
+                        results_str.append("T: WIN" if actual_total > line else "T: LOSS")
+                    elif "UNDER" in t_pick: 
+                        results_str.append("T: WIN" if actual_total < line else "T: LOSS")
 
-            if m_pick not in ["PASS", ""]:
-                if "HOME" in m_pick: results_str.append("ML: WIN" if actual_home > actual_away else "ML: LOSS")
-                elif "AWAY" in m_pick: results_str.append("ML: WIN" if actual_away > actual_home else "ML: LOSS")
+            # --- GRADE MONEYLINE ---
+            if m_pick and "PASS" not in m_pick:
+                if "HOME" in m_pick: 
+                    results_str.append("ML: WIN" if actual_home > actual_away else "ML: LOSS")
+                elif "AWAY" in m_pick: 
+                    results_str.append("ML: WIN" if actual_away > actual_home else "ML: LOSS")
 
-            if s_pick not in ["PASS", ""]:
-                try:
-                    spread_val = float(s_pick.split()[1])
+            # --- GRADE SPREAD (RUNLINE) ---
+            if s_pick and "PASS" not in s_pick:
+                spread_val = extract_line(s_pick)
+                if spread_val is not None:
                     if "HOME" in s_pick:
                         adj_home = actual_home + spread_val
-                        if adj_home == actual_away: results_str.append("RL: PUSH")
-                        else: results_str.append("RL: WIN" if adj_home > actual_away else "RL: LOSS")
+                        if adj_home == actual_away: 
+                            results_str.append("RL: PUSH")
+                        else: 
+                            results_str.append("RL: WIN" if adj_home > actual_away else "RL: LOSS")
                     elif "AWAY" in s_pick:
                         adj_away = actual_away + spread_val
-                        if adj_away == actual_home: results_str.append("RL: PUSH")
-                        else: results_str.append("RL: WIN" if adj_away > actual_home else "RL: LOSS")
-                except: pass
+                        if adj_away == actual_home: 
+                            results_str.append("RL: PUSH")
+                        else: 
+                            results_str.append("RL: WIN" if adj_away > actual_home else "RL: LOSS")
 
+            # Compile final grade string
             final_res = " | ".join(results_str) if results_str else "NO ACTION"
 
             cells_to_update.append(gspread.Cell(row=i, col=27, value=formatted_actual))
@@ -142,6 +177,8 @@ def update_master_results():
     if cells_to_update:
         sheet.update_cells(cells_to_update)
         print(f"Batch updated {len(cells_to_update)} Sheet cells successfully.")
+    else:
+        print("All completed games are already graded or sheet is clean.")
 
 if __name__ == "__main__":
     update_master_results()
