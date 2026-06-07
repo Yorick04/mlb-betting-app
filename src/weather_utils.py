@@ -1,10 +1,12 @@
 import requests
+import time
 from stadiums import STADIUM_COORDS
 
 def get_stadium_weather(home_team, game_date=None, roof_status="Open"):
     """
     Fetches real-time weather metrics using the clean current_weather endpoint.
     Correctly extracts numeric coordinates from dictionaries to prevent 400 errors.
+    Includes a retry mechanism for GitHub Actions / API throttling.
     """
     # Standard Fallback/Indoor Object
     indoor_metrics = {
@@ -40,37 +42,53 @@ def get_stadium_weather(home_team, game_date=None, roof_status="Open"):
         "timezone": "auto"
     }
 
-    try:
-        response = requests.get(url, params=params, timeout=15)
-        
-        # Verify the server returned a clean 200 OK status
-        if response.status_code == 200:
-            data = response.json()
-            current = data.get("current_weather", {})
+    # 4. Built-in Retry Logic for GitHub Actions (combats timeouts/rate limits)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Increased timeout to 20 seconds for slower runner connections
+            response = requests.get(url, params=params, timeout=20)
             
-            # Extract and parse metrics from the legacy structure
-            temp = round(current.get("temperature", 72))
-            wind_speed = round(current.get("windspeed", 0))
-            wind_deg = current.get("winddirection", 0)
-            humidity = 50 # Clean fallback since current_weather isolates vector stats
-            
-            # Convert degree heading to standard cardinal string
-            wind_dir = get_cardinal_direction(wind_deg)
-            
-            return {
-                "temp": temp,
-                "wind_speed": wind_speed,
-                "wind_dir": wind_dir,
-                "humidity": humidity,
-                "wind_deg": wind_deg
-            }
-        else:
-            print(f"Weather API returned server error status {response.status_code} for {home_team}. Defaulting values.")
+            # Verify the server returned a clean 200 OK status
+            if response.status_code == 200:
+                data = response.json()
+                current = data.get("current_weather", {})
+                
+                # Extract and parse metrics from the legacy structure
+                temp = round(current.get("temperature", 72))
+                wind_speed = round(current.get("windspeed", 0))
+                wind_deg = current.get("winddirection", 0)
+                humidity = 50 # Clean fallback since current_weather isolates vector stats
+                
+                # Convert degree heading to standard cardinal string
+                wind_dir = get_cardinal_direction(wind_deg)
+                
+                return {
+                    "temp": temp,
+                    "wind_speed": wind_speed,
+                    "wind_dir": wind_dir,
+                    "humidity": humidity,
+                    "wind_deg": wind_deg
+                }
+            elif response.status_code == 429:
+                # Rate limited - wait and retry
+                print(f"Rate limited by weather API for {home_team}. Retrying...")
+                time.sleep(2)
+                continue
+            else:
+                print(f"Weather API returned server error status {response.status_code} for {home_team}. Defaulting values.")
+                return indoor_metrics
+                
+        except requests.exceptions.ReadTimeout:
+            print(f"Weather API read timeout for {home_team} (Attempt {attempt + 1}/{max_retries})...")
+            time.sleep(2)  # Pause before retrying
+        except Exception as e:
+            print(f"Error fetching weather for {home_team}: {e}")
             return indoor_metrics
-            
-    except Exception as e:
-        print(f"Error fetching weather for {home_team}: {e}")
-        return indoor_metrics
+
+    # If all retries fail
+    print(f"All weather API retries failed for {home_team}. Defaulting values.")
+    return indoor_metrics
 
 def get_cardinal_direction(degrees):
     """Converts a wind degree mapping (0-360) into standard cardinal directions."""

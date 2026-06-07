@@ -1,6 +1,9 @@
 import requests
 from functools import lru_cache
 
+# Initialize a persistent session to prevent GitHub Actions timeouts
+session = requests.Session()
+
 # 2026 League Average FIP Constant (Can be updated dynamically mid-season)
 CURRENT_FIP_CONSTANT = 3.20
 
@@ -24,7 +27,8 @@ def get_pitcher_metrics(player_id):
     url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=season&group=pitching"
     
     try:
-        response = requests.get(url, timeout=10).json()
+        # Replaced requests.get with session.get
+        response = session.get(url, timeout=10).json()
         
         # CRITICAL SAFETY CHECK: Ensure stats, splits, and the inner dictionary exist
         if (

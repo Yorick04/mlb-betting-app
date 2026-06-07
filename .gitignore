@@ -1,6 +1,9 @@
 # Environments and Secrets
 .env
 *.env
+venv/
+.venv/
+env/
 
 # Python Cache
 __pycache__/
@@ -11,4 +14,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Secrets / Keys
 service_account_key.json
+
+# SQLite temporary cache files (Do NOT ignore the main .db file!)
+*-journal
+*.db-journal
+
+# Logs
+*.log

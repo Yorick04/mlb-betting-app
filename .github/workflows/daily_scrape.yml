@@ -11,6 +11,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    # CRITICAL: This allows the GitHub bot to save the database back to your repo
+    permissions:
+      contents: write 
 
     steps:
       - name: Checkout code
@@ -20,17 +24,37 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip' # This speeds up your runs!
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Scraper, Predictor, and Results Tracker
+      - name: Run Scraper (Fetch Weather, Odds, Stats)
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
+        run: python src/scraper.py
+
+      - name: Retrain AI Models (Learn from yesterday's games)
+        run: python src/ai_training.py
+
+      - name: Predict Today & Track Results
+        env:
+          GOOGLE_SHEETS_JSON: ${{ secrets.GOOGLE_SHEETS_JSON }}
         run: |
-          python src/scraper.py
           python src/predict_today.py
           python src/results_tracker.py
+
+      - name: Commit and Push Updated DB & Models
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Stage the updated database, new AI models, and odds cache
+          git add mlb_historical_data.db src/*.pkl src/*.json
+          
+          # Commit and push ONLY if there are new changes
+          git diff --staged --quiet || git commit -m "🤖 Auto-update DB, AI Models, and Cache"
+          git push

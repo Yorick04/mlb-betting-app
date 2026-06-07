@@ -4,6 +4,9 @@ from functools import lru_cache
 # 2026 League Average OPS Baseline
 LEAGUE_AVG_OPS = 0.720
 
+# --- FIX: Implement a persistent session to prevent GitHub Actions from dropping connections ---
+session = requests.Session()
+
 @lru_cache(maxsize=128)
 def get_pitcher_hand(pitcher_id):
     """Hits the MLB API to determine if the opposing starter is a LHP or RHP."""
@@ -12,7 +15,8 @@ def get_pitcher_hand(pitcher_id):
         
     try:
         url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}"
-        resp = requests.get(url, timeout=10).json()
+        # Replaced requests.get with session.get
+        resp = session.get(url, timeout=10).json()
         return resp['people'][0]['pitchHand']['code']
     except:
         return 'R'
@@ -29,7 +33,8 @@ def get_lineup_multiplier(team_id, opp_pitcher_id, game_date_str=None):
     url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=statSplits&group=hitting&season={season}"
     
     try:
-        response = requests.get(url, timeout=10).json()
+        # Replaced requests.get with session.get
+        response = session.get(url, timeout=10).json()
         splits = response.get('stats', [{}])[0].get('splits', [])
         
         ops = LEAGUE_AVG_OPS

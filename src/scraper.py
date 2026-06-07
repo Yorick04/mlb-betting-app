@@ -153,7 +153,10 @@ def run_scraper():
             "home_bp_score": h_bp.get('bp_score', 4.50), "away_bp_score": a_bp.get('bp_score', 4.50),
             "home_fatigue": h_f, "away_fatigue": a_f, "home_lineup_mult": h_lineup, "away_lineup_mult": a_lineup,
             "temp": temp, "wind_speed": wind_sp, "wind_dir": wind_dir, "park_factor": park_factor, "umpire_multiplier": ump_mult,
-            "ml_home": ml_home, "ml_away": ml_away, "spread": spread, "ou_total": ou_total,
+            "ml_home": None if ml_home == "N/A" else ml_home, 
+            "ml_away": None if ml_away == "N/A" else ml_away, 
+            "spread": None if spread == "N/A" else spread, 
+            "ou_total": None if ou_total == "N/A" else ou_total,
             "projected_home_runs": 0.0, "projected_away_runs": 0.0
         }
 
@@ -207,11 +210,11 @@ def run_scraper():
                 rows_to_insert.append(row)
             else:
                 # UPDATE existing row with fresh odds and live weather
-                # Google Sheets columns: F=6(H ML), G=7(A ML), H=8(Spread), I=9(O/U)
-                cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=ml_home))
-                cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=ml_away))
-                cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=spread))
-                cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=ou_total))
+                # Only update odds cells if we actually pulled valid numbers
+                if ml_home not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=ml_home))
+                if ml_away not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=ml_away))
+                if spread not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=spread))
+                if ou_total not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=ou_total))
                 
                 # Update live weather (Cols S=19, T=20, U=21)
                 cells_to_update.append(gspread.Cell(row=row_idx, col=19, value=temp))

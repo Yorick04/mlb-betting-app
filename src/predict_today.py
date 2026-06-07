@@ -50,8 +50,16 @@ def run_daily_predictions():
         'temp', 'park_factor', 'umpire_multiplier'
     ]
     
-    # Handle missing values to prevent scaler crashes
-    df[features] = df[features].fillna(df[features].mean())
+    # Handle missing values with safe neutral baselines instead of column means
+    fallback_defaults = {
+        'home_sp_score': 4.50, 'away_sp_score': 4.50, 
+        'home_bp_score': 4.50, 'away_bp_score': 4.50, 
+        'home_fatigue': 0.0, 'away_fatigue': 0.0, 
+        'home_lineup_mult': 1.0, 'away_lineup_mult': 1.0, 
+        'temp': 72.0, 'park_factor': 100.0, 'umpire_multiplier': 1.0
+    }
+    
+    df[features] = df[features].fillna(fallback_defaults)
     X = df[features]
     X_scaled = scaler.transform(X)
 

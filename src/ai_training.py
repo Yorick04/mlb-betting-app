@@ -34,7 +34,10 @@ def train_mybaseball_pal_ai():
         'temp', 'park_factor', 'umpire_multiplier'
     ]
     
+    # --- FIX: Added SP and BP scores to prevent scaler from crashing on TBD games ---
     fill_values = {
+        'home_sp_score': 4.50, 'away_sp_score': 4.50,
+        'home_bp_score': 4.50, 'away_bp_score': 4.50,
         'temp': 72.0, 'park_factor': 100.0, 'umpire_multiplier': 1.0,
         'home_fatigue': 0.0, 'away_fatigue': 0.0,
         'home_lineup_mult': 1.0, 'away_lineup_mult': 1.0
