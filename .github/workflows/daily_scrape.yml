@@ -52,8 +52,8 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Stage the updated database, new AI models, and odds cache
-          git add mlb_historical_data.db src/*.pkl src/*.json
+          # Stage the updated database, new AI models (now in root directory), and odds cache
+          git add mlb_historical_data.db *.pkl src/*.json
           
           # Commit and push ONLY if there are new changes
           git diff --staged --quiet || git commit -m "🤖 Auto-update DB, AI Models, and Cache"
