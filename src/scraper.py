@@ -174,6 +174,7 @@ def run_scraper():
             :ml_home, :ml_away, :spread, :ou_total, :projected_home_runs, :projected_away_runs, 'PENDING'
         )
         ON CONFLICT(game_id) DO UPDATE SET
+            home_pitcher=excluded.home_pitcher, away_pitcher=excluded.away_pitcher,
             home_sp_score=excluded.home_sp_score, away_sp_score=excluded.away_sp_score,
             home_bp_score=excluded.home_bp_score, away_bp_score=excluded.away_bp_score,
             home_lineup_mult=excluded.home_lineup_mult, away_lineup_mult=excluded.away_lineup_mult,
@@ -209,7 +210,10 @@ def run_scraper():
                 ]
                 rows_to_insert.append(row)
             else:
-                # UPDATE existing row with fresh odds and live weather
+                # UPDATE existing row with fresh odds, live weather, and pitcher names
+                if hp_name and hp_name != "TBD": cells_to_update.append(gspread.Cell(row=row_idx, col=4, value=hp_name))
+                if ap_name and ap_name != "TBD": cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=ap_name))
+                
                 # Only update odds cells if we actually pulled valid numbers
                 if ml_home not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=ml_home))
                 if ml_away not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=ml_away))
@@ -228,7 +232,7 @@ def run_scraper():
         
     if sheet and cells_to_update:
         sheet.update_cells(cells_to_update)
-        print(f"\n✅ Updated Odds & Live Weather for {len(cells_to_update)//7} existing games in the Google Sheet.")
+        print(f"\n✅ Updated Odds, Weather, and Pitchers for {len(cells_to_update)//9} existing games in the Google Sheet.")
         
     db_conn.close()
     print("--- ⚾ Scraper Complete ---")

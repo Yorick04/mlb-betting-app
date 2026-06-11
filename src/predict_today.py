@@ -1,6 +1,7 @@
 import sqlite3
 import pandas as pd
 import joblib
+import xgboost as xgb
 from datetime import datetime
 import pytz
 import os, json, gspread
@@ -17,67 +18,71 @@ def get_google_sheet_client():
 def run_daily_predictions():
     print("--- 🤖 MLB AI Daily Predictor ---")
     
-    # 1. Load BOTH trained AI models and the scaler
+    # Automatically resolve the root directory path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(script_dir)
+    
     try:
-        model_ml = joblib.load('mlb_ml_model.pkl')
-        model_ou = joblib.load('mlb_ou_model.pkl')
-        scaler = joblib.load('scaler.pkl')
-        print("✅ Successfully loaded ML Model, OU Model, and Scaler.")
+        model_ml = joblib.load(os.path.join(root_dir, 'mlb_ml_model.pkl'))
+        model_home = joblib.load(os.path.join(root_dir, 'mlb_home_model.pkl'))
+        model_away = joblib.load(os.path.join(root_dir, 'mlb_away_model.pkl'))
+        scaler = joblib.load(os.path.join(root_dir, 'scaler.pkl'))
+        print("✅ Successfully loaded ML Model, Split Models, and Scaler.")
     except FileNotFoundError:
         print("❌ Error: Could not find the required .pkl files.")
-        print("Make sure you have run your ai_training.py script first!")
         return
 
-    # 2. Fetch today's pending games from the database
-    conn = sqlite3.connect("mlb_historical_data.db")
+    db_path = os.path.join(root_dir, "mlb_historical_data.db")
+    conn = sqlite3.connect(db_path)
     query = "SELECT * FROM game_logs WHERE status = 'PENDING'"
     df = pd.read_sql_query(query, conn)
     conn.close()
 
     if df.empty:
         print("\n⚾ No pending games found in the database.")
-        print("Make sure you run your daily scraper first so the AI has games to predict!")
         return
 
-    print(f"🔍 Analyzing {len(df)} upcoming games...\n")
+    def calculate_wind_impact(row):
+        dir_str = str(row['wind_dir']).lower()
+        speed = float(row['wind_speed']) if pd.notna(row['wind_speed']) else 0.0
+        if 'out' in dir_str: return speed * 1.0
+        elif 'in' in dir_str: return speed * -1.0
+        else: return 0.0
+        
+    df['wind_impact'] = df.apply(calculate_wind_impact, axis=1)
 
-    # 3. Prepare the features
     features = [
         'home_sp_score', 'away_sp_score', 
         'home_bp_score', 'away_bp_score', 
         'home_fatigue', 'away_fatigue', 
         'home_lineup_mult', 'away_lineup_mult', 
-        'temp', 'park_factor', 'umpire_multiplier'
+        'temp', 'park_factor', 'umpire_multiplier', 'wind_impact'
     ]
     
-    # Handle missing values with safe neutral baselines instead of column means
     fallback_defaults = {
         'home_sp_score': 4.50, 'away_sp_score': 4.50, 
         'home_bp_score': 4.50, 'away_bp_score': 4.50, 
         'home_fatigue': 0.0, 'away_fatigue': 0.0, 
         'home_lineup_mult': 1.0, 'away_lineup_mult': 1.0, 
-        'temp': 72.0, 'park_factor': 100.0, 'umpire_multiplier': 1.0
+        'temp': 72.0, 'park_factor': 100.0, 'umpire_multiplier': 1.0,
+        'wind_impact': 0.0
     }
     
     df[features] = df[features].fillna(fallback_defaults)
     X = df[features]
     X_scaled = scaler.transform(X)
 
-    # 4. Generate Predictions
     df['ai_projected_diff'] = model_ml.predict(X_scaled)
-    df['ai_projected_total'] = model_ou.predict(X_scaled)
+    df['ai_projected_home'] = model_home.predict(X_scaled)
+    df['ai_projected_away'] = model_away.predict(X_scaled)
+    df['ai_projected_total'] = df['ai_projected_home'] + df['ai_projected_away']
 
-    # 5. Connect to Google Sheets to map rows
-    print("📡 Connecting to Google Sheets to write AI picks...")
+    print("📡 Connecting to Google Sheets...")
     try:
         client = get_google_sheet_client()
         sheet = client.open("mlb-betting-app").worksheet("Master")
         all_rows = sheet.get_all_records()
-        
-        row_map = {}
-        for i, r in enumerate(all_rows, start=2): # start=2 because row 1 is headers
-            key = f"{r.get('Date (CT)', '')}_{r.get('Home', '')}_{r.get('Away', '')}"
-            row_map[key] = i
+        row_map = {f"{r.get('Date (CT)', '')}_{r.get('Home', '')}_{r.get('Away', '')}": i for i, r in enumerate(all_rows, start=2)}
     except Exception as e:
         print(f"⚠️ Could not connect to Google Sheets: {e}")
         row_map = {}
@@ -97,11 +102,9 @@ def run_daily_predictions():
         predicted_diff = row['ai_projected_diff']
         predicted_total = row['ai_projected_total']
         
-        # --- CALCULATE EXACT TEAM TOTALS ---
-        exp_home = (predicted_total + predicted_diff) / 2
-        exp_away = (predicted_total - predicted_diff) / 2
+        exp_home = row['ai_projected_home']
+        exp_away = row['ai_projected_away']
         
-        # --- MONEYLINE LOGIC ---
         if predicted_diff > 0:
             ml_pick_str = "HOME"
             pick_display = f"🏠 HOME ({home})"
@@ -117,7 +120,6 @@ def run_daily_predictions():
         else:
             ml_sheet_val = "PASS"
 
-        # --- OVER/UNDER LOGIC ---
         ou_total = row.get('ou_total', 'N/A')
         ou_sheet_val = "PASS"
         
@@ -137,29 +139,23 @@ def run_daily_predictions():
         print(f"   ML Pick: {pick_display} by {margin:.2f} runs -> {ml_sheet_val}")
         print(f"   OU Pick: Projected Total: {predicted_total:.2f} -> {ou_sheet_val}")
 
-        # Queue the Google Sheet updates
         game_key = f"{row['game_date']}_{home}_{away}"
         if game_key in row_map:
             row_idx = row_map[game_key]
-            
-            # Write Projections to columns 10, 11, 12
-            cells_to_update.append(gspread.Cell(row=row_idx, col=10, value=round(exp_home, 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=11, value=round(exp_away, 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=12, value=round(predicted_total, 2)))
-            
-            # FORCE SYNC SCORING FEATURES (Cols 13-18)
-            cells_to_update.append(gspread.Cell(row=row_idx, col=13, value=round(row['home_sp_score'], 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=14, value=round(row['away_sp_score'], 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=15, value=round(row['home_bp_score'], 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=16, value=round(row['away_bp_score'], 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=17, value=round(row['home_fatigue'], 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=18, value=round(row['away_fatigue'], 2)))
-            
-            # Write Picks to columns 23, 24
-            cells_to_update.append(gspread.Cell(row=row_idx, col=23, value=ou_sheet_val))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=24, value=ml_sheet_val))
+            cells_to_update.extend([
+                gspread.Cell(row=row_idx, col=10, value=round(exp_home, 2)),
+                gspread.Cell(row=row_idx, col=11, value=round(exp_away, 2)),
+                gspread.Cell(row=row_idx, col=12, value=round(predicted_total, 2)),
+                gspread.Cell(row=row_idx, col=13, value=round(row['home_sp_score'], 2)),
+                gspread.Cell(row=row_idx, col=14, value=round(row['away_sp_score'], 2)),
+                gspread.Cell(row=row_idx, col=15, value=round(row['home_bp_score'], 2)),
+                gspread.Cell(row=row_idx, col=16, value=round(row['away_bp_score'], 2)),
+                gspread.Cell(row=row_idx, col=17, value=round(row['home_fatigue'], 2)),
+                gspread.Cell(row=row_idx, col=18, value=round(row['away_fatigue'], 2)),
+                gspread.Cell(row=row_idx, col=23, value=ou_sheet_val),
+                gspread.Cell(row=row_idx, col=24, value=ml_sheet_val)
+            ])
 
-    # Execute Batch Update
     if cells_to_update:
         try:
             sheet.update_cells(cells_to_update)

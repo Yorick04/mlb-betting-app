@@ -1,8 +1,14 @@
 import sqlite3
 import pandas as pd
+import os
 
 def find_anomalies():
-    conn = sqlite3.connect("mlb_historical_data.db")
+    # Automatically resolve the root directory path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(script_dir)
+    db_path = os.path.join(root_dir, "mlb_historical_data.db")
+    
+    conn = sqlite3.connect(db_path)
     df = pd.read_sql_query("SELECT * FROM game_logs", conn)
     conn.close()
 
