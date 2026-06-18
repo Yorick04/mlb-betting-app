@@ -18,7 +18,6 @@ def get_google_sheet_client():
 def run_daily_predictions():
     print("--- 🤖 MLB AI Daily Predictor ---")
     
-    # Automatically resolve the root directory path
     script_dir = os.path.dirname(os.path.abspath(__file__))
     root_dir = os.path.dirname(script_dir)
     
@@ -82,10 +81,9 @@ def run_daily_predictions():
         client = get_google_sheet_client()
         sheet = client.open("mlb-betting-app").worksheet("Master")
         all_rows = sheet.get_all_records()
-        row_map = {f"{r.get('Date (CT)', '')}_{r.get('Home', '')}_{r.get('Away', '')}": i for i, r in enumerate(all_rows, start=2)}
     except Exception as e:
         print(f"⚠️ Could not connect to Google Sheets: {e}")
-        row_map = {}
+        all_rows = []
 
     cells_to_update = []
 
@@ -105,6 +103,7 @@ def run_daily_predictions():
         exp_home = row['ai_projected_home']
         exp_away = row['ai_projected_away']
         
+        # --- 1. MONEYLINE LOGIC ---
         if predicted_diff > 0:
             ml_pick_str = "HOME"
             pick_display = f"🏠 HOME ({home})"
@@ -119,9 +118,12 @@ def run_daily_predictions():
             ml_sheet_val = f"{ml_pick_str} | {stars_ml}"
         else:
             ml_sheet_val = "PASS"
+            stars_ml = ""
 
+        # --- 2. TOTALS (O/U) LOGIC ---
         ou_total = row.get('ou_total', 'N/A')
         ou_sheet_val = "PASS"
+        stars_ou = ""
         
         if pd.notna(ou_total) and str(ou_total) != 'N/A':
             try:
@@ -133,15 +135,50 @@ def run_daily_predictions():
                     ou_sheet_val = f"{ou_dir} {line} | {stars_ou}"
             except:
                 pass
+
+        # --- 3. SPREAD LOGIC ---
+        spread_val = row.get('spread', 'N/A')
+        spread_sheet_val = "PASS"
+        stars_sp = ""
+        
+        if pd.notna(spread_val) and str(spread_val) != 'N/A':
+            try:
+                # 'line' is the sportsbook's Home Spread (usually -1.5 or +1.5)
+                # 'predicted_diff' is AI's expected Home margin
+                line = float(spread_val)
+                home_cover_margin = predicted_diff + line
+                
+                if home_cover_margin >= 0.75:
+                    stars_sp = "★★★" if home_cover_margin >= 2.0 else "★★" if home_cover_margin >= 1.25 else "★"
+                    spread_sheet_val = f"HOME {line} | {stars_sp}"
+                elif home_cover_margin <= -0.75:
+                    away_line = -line
+                    away_line_str = f"+{away_line}" if away_line > 0 else f"{away_line}"
+                    stars_sp = "★★★" if home_cover_margin <= -2.0 else "★★" if home_cover_margin <= -1.25 else "★"
+                    spread_sheet_val = f"AWAY {away_line_str} | {stars_sp}"
+            except:
+                pass
+
+        # --- 4. CUMULATIVE STARS LOGIC ---
+        total_stars_count = len(stars_ml) + len(stars_ou) + len(stars_sp)
+        cumulative_stars_val = "★" * total_stars_count if total_stars_count > 0 else "PASS"
                 
         print(f"\n{matchup}")
         print(f"   Proj Score: {home} {exp_home:.1f} | {away} {exp_away:.1f} (Total: {predicted_total:.1f})")
         print(f"   ML Pick: {pick_display} by {margin:.2f} runs -> {ml_sheet_val}")
         print(f"   OU Pick: Projected Total: {predicted_total:.2f} -> {ou_sheet_val}")
+        print(f"   Spread Pick: {spread_sheet_val}")
+        print(f"   Cumulative Stars: {cumulative_stars_val}")
 
-        game_key = f"{row['game_date']}_{home}_{away}"
-        if game_key in row_map:
-            row_idx = row_map[game_key]
+        row_idx = None
+        for i, r in enumerate(all_rows, start=2):
+            if r.get('Date (CT)') == row['game_date'] and r.get('Home') == home and r.get('Away') == away:
+                if (r.get('Home Pitcher') == row['home_pitcher'] and r.get('Away Pitcher') == row['away_pitcher']) or (r.get('Home Pitcher') == 'TBD' or r.get('Away Pitcher') == 'TBD'):
+                    row_idx = i
+                    r['Home Pitcher'] = "MATCHED_DH" 
+                    break
+
+        if row_idx:
             cells_to_update.extend([
                 gspread.Cell(row=row_idx, col=10, value=round(exp_home, 2)),
                 gspread.Cell(row=row_idx, col=11, value=round(exp_away, 2)),
@@ -153,7 +190,9 @@ def run_daily_predictions():
                 gspread.Cell(row=row_idx, col=17, value=round(row['home_fatigue'], 2)),
                 gspread.Cell(row=row_idx, col=18, value=round(row['away_fatigue'], 2)),
                 gspread.Cell(row=row_idx, col=23, value=ou_sheet_val),
-                gspread.Cell(row=row_idx, col=24, value=ml_sheet_val)
+                gspread.Cell(row=row_idx, col=24, value=ml_sheet_val),
+                gspread.Cell(row=row_idx, col=25, value=spread_sheet_val),
+                gspread.Cell(row=row_idx, col=26, value=cumulative_stars_val)
             ])
 
     if cells_to_update:

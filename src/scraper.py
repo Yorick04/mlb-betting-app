@@ -61,7 +61,7 @@ def run_scraper():
         sheet = None
         
     rows_to_insert = []
-    cells_to_update = [] # Holds updates for games that already exist on the sheet
+    cells_to_update = [] 
     
     # 5. Process Each Game
     for g in games:
@@ -76,7 +76,10 @@ def run_scraper():
         
         print(f"\nProcessing: {away_team} @ {home_team}")
         
+        # Unique game ID to differentiate double headers cleanly
         db_game_id = f"{today}_{home_team}_{away_team}"
+        if g.get('gameNumber', 1) > 1:
+            db_game_id += f"_G{g['gameNumber']}"
         
         # --- Pitcher Logic ---
         hp_id = g['teams']['home'].get('probablePitcher', {}).get('id', "TBD")
@@ -91,7 +94,6 @@ def run_scraper():
         ap_xera = statcast_utils.get_pitcher_xera(ap_name)
         hp_score = hp_xera if hp_xera else hp_metrics.get('score', 4.50)
         ap_score = ap_xera if ap_xera else ap_metrics.get('score', 4.50)
-        # Cap extreme small-sample outliers so they don't break the StandardScaler
         hp_score = min(hp_score, 8.50)
         ap_score = min(ap_score, 8.50)
         
@@ -122,20 +124,16 @@ def run_scraper():
                 break
         ump_mult = get_umpire_multiplier(umpire_name)
         
-        # ---------------------------------------------------------
-        # 🛡️ THE ODDS MEMORY PATCH 🛡️
-        # ---------------------------------------------------------
+        # --- THE ODDS MEMORY PATCH ---
         game_odds = odds.get(f"{home_team}_{away_team}", {})
         ml_home = game_odds.get('ml_home')
         ml_away = game_odds.get('ml_away')
         spread = game_odds.get('spread')
         ou_total = game_odds.get('ou_total')
 
-        # If The Odds API dropped the game (because it started or wasn't posted), rescue our morning odds from SQLite
         if ml_home is None or ml_home == "N/A" or ou_total is None or ou_total == "N/A":
             db_cursor.execute("SELECT ml_home, ml_away, spread, ou_total FROM game_logs WHERE game_id = ?", (db_game_id,))
             saved = db_cursor.fetchone()
-            
             if saved and saved[0] is not None and str(saved[0]) != "N/A":
                 ml_home, ml_away, spread, ou_total = saved
                 print(f"   🔄 Rescued morning odds for {home_team} from database.")
@@ -144,7 +142,6 @@ def run_scraper():
         ml_away = ml_away if ml_away is not None else "N/A"
         spread = spread if spread is not None else "N/A"
         ou_total = ou_total if ou_total is not None else "N/A"
-        # ---------------------------------------------------------
 
         # --- 6. Save to SQLite Database ---
         clean_data = {
@@ -160,7 +157,6 @@ def run_scraper():
             "projected_home_runs": 0.0, "projected_away_runs": 0.0
         }
 
-        # Use COALESCE to ensure we never overwrite good odds with N/A on a second run
         sql = '''
         INSERT INTO game_logs (
             game_id, game_date, home_team, away_team, home_pitcher, away_pitcher,
@@ -193,14 +189,16 @@ def run_scraper():
         if sheet:
             is_new = True
             row_idx = None
-            for i, r in enumerate(existing_rows, start=2): # start=2 offsets header row
+            for i, r in enumerate(existing_rows, start=2): 
                 if r.get('Date (CT)') == today and r.get('Home') == home_team and r.get('Away') == away_team:
-                    is_new = False
-                    row_idx = i
-                    break
+                    if (r.get('Home Pitcher') == hp_name and r.get('Away Pitcher') == ap_name) or (r.get('Home Pitcher') == 'TBD' or r.get('Away Pitcher') == 'TBD'):
+                        is_new = False
+                        row_idx = i
+                        # Prevent next game in double-header from matching this same TBD row
+                        r['Home Pitcher'] = "MATCHED_DH" 
+                        break
                     
             if is_new:
-                # Add entirely new row. Leave AI prediction columns as "N/A" and "PASS"
                 row = [
                     today, home_team, away_team, hp_name, ap_name, ml_home, ml_away, spread, ou_total, 
                     "N/A", "N/A", "N/A", round(hp_score, 2), round(ap_score, 2), 
@@ -210,29 +208,25 @@ def run_scraper():
                 ]
                 rows_to_insert.append(row)
             else:
-                # UPDATE existing row with fresh odds, live weather, and pitcher names
                 if hp_name and hp_name != "TBD": cells_to_update.append(gspread.Cell(row=row_idx, col=4, value=hp_name))
                 if ap_name and ap_name != "TBD": cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=ap_name))
                 
-                # Only update odds cells if we actually pulled valid numbers
                 if ml_home not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=ml_home))
                 if ml_away not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=ml_away))
                 if spread not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=spread))
                 if ou_total not in ["N/A", None]: cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=ou_total))
                 
-                # Update live weather (Cols S=19, T=20, U=21)
                 cells_to_update.append(gspread.Cell(row=row_idx, col=19, value=temp))
                 cells_to_update.append(gspread.Cell(row=row_idx, col=20, value=wind_sp))
                 cells_to_update.append(gspread.Cell(row=row_idx, col=21, value=wind_dir))
             
-    # Execute batch writes to Google Sheets
     if sheet and rows_to_insert:
         sheet.append_rows(rows_to_insert)
         print(f"\n✅ Appended {len(rows_to_insert)} new games to Google Sheet.")
         
     if sheet and cells_to_update:
         sheet.update_cells(cells_to_update)
-        print(f"\n✅ Updated Odds, Weather, and Pitchers for {len(cells_to_update)//9} existing games in the Google Sheet.")
+        print(f"\n✅ Updated Odds, Weather, and Pitchers for existing games in the Google Sheet.")
         
     db_conn.close()
     print("--- ⚾ Scraper Complete ---")
