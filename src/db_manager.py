@@ -34,8 +34,8 @@ def setup_database():
         away_bp_score REAL,
         home_fatigue REAL,
         away_fatigue REAL,
-        home_lineup_mult REAL,   -- NEW: Added Home Hitter Threat
-        away_lineup_mult REAL,   -- NEW: Added Away Hitter Threat
+        home_lineup_mult REAL,   
+        away_lineup_mult REAL,   
         temp REAL,
         wind_speed REAL,
         wind_dir TEXT,
@@ -57,6 +57,16 @@ def setup_database():
     )
     ''')
     
+    # --- AUTO-PATCH DB SCHEMA ---
+    # Safely injects new odds tracking columns into your existing database
+    cursor.execute("PRAGMA table_info(game_logs)")
+    columns = [col[1] for col in cursor.fetchall()]
+    
+    if "spread_odds" not in columns:
+        cursor.execute("ALTER TABLE game_logs ADD COLUMN spread_odds TEXT")
+    if "ou_odds" not in columns:
+        cursor.execute("ALTER TABLE game_logs ADD COLUMN ou_odds TEXT")
+    
     conn.commit()
     conn.close()
     print("✅ SQLite Database verified/created successfully.")
@@ -73,29 +83,35 @@ def upsert_game(game_data):
     # Convert 'N/A' strings to actual None (NULL in SQL) for better ML processing later
     clean_data = {k: (None if v == "N/A" else v) for k, v in game_data.items()}
     
+    # Ensure our new keys exist in the payload to prevent SQL errors
+    if "spread_odds" not in clean_data: clean_data["spread_odds"] = None
+    if "ou_odds" not in clean_data: clean_data["ou_odds"] = None
+    
     sql = '''
     INSERT INTO game_logs (
         game_id, game_date, home_team, away_team, home_pitcher, away_pitcher,
         home_sp_score, away_sp_score, home_bp_score, away_bp_score, home_fatigue, away_fatigue,
-        home_lineup_mult, away_lineup_mult, -- NEW
+        home_lineup_mult, away_lineup_mult, 
         temp, wind_speed, wind_dir, park_factor, umpire_multiplier,
-        ml_home, ml_away, spread, ou_total, projected_home_runs, projected_away_runs, status
+        ml_home, ml_away, spread, ou_total, spread_odds, ou_odds, projected_home_runs, projected_away_runs, status
     ) VALUES (
         :game_id, :game_date, :home_team, :away_team, :home_pitcher, :away_pitcher,
         :home_sp_score, :away_sp_score, :home_bp_score, :away_bp_score, :home_fatigue, :away_fatigue,
-        :home_lineup_mult, :away_lineup_mult, -- NEW
+        :home_lineup_mult, :away_lineup_mult, 
         :temp, :wind_speed, :wind_dir, :park_factor, :umpire_multiplier,
-        :ml_home, :ml_away, :spread, :ou_total, :projected_home_runs, :projected_away_runs, 'PENDING'
+        :ml_home, :ml_away, :spread, :ou_total, :spread_odds, :ou_odds, :projected_home_runs, :projected_away_runs, 'PENDING'
     )
     ON CONFLICT(game_id) DO UPDATE SET
         home_sp_score=excluded.home_sp_score,
         away_sp_score=excluded.away_sp_score,
-        home_lineup_mult=excluded.home_lineup_mult, -- NEW
-        away_lineup_mult=excluded.away_lineup_mult, -- NEW
+        home_lineup_mult=excluded.home_lineup_mult, 
+        away_lineup_mult=excluded.away_lineup_mult, 
         ml_home=COALESCE(excluded.ml_home, game_logs.ml_home),
         ml_away=COALESCE(excluded.ml_away, game_logs.ml_away),
         spread=COALESCE(excluded.spread, game_logs.spread),
-        ou_total=COALESCE(excluded.ou_total, game_logs.ou_total);
+        ou_total=COALESCE(excluded.ou_total, game_logs.ou_total),
+        spread_odds=COALESCE(excluded.spread_odds, game_logs.spread_odds),
+        ou_odds=COALESCE(excluded.ou_odds, game_logs.ou_odds);
     '''
     
     cursor.execute(sql, clean_data)

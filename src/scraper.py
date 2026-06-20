@@ -142,8 +142,18 @@ def run_scraper():
         ml_away = ml_away if ml_away is not None else "N/A"
         spread = spread if spread is not None else "N/A"
         ou_total = ou_total if ou_total is not None else "N/A"
+        
+        # Extract the Odds Prices to write out to Columns 29/30
+        spread_home_odds = game_odds.get('rl_home_price', "N/A")
+        spread_away_odds = game_odds.get('rl_away_price', "N/A")
+        ou_over_odds = game_odds.get('ou_over_price', "N/A")
+        ou_under_odds = game_odds.get('ou_under_price', "N/A")
+        
+        spread_odds_str = f"H: {spread_home_odds} | A: {spread_away_odds}" if spread_home_odds != "N/A" else "N/A"
+        ou_odds_str = f"O: {ou_over_odds} | U: {ou_under_odds}" if ou_over_odds != "N/A" else "N/A"
 
         # --- 6. Save to SQLite Database ---
+        # The clean_data payload now includes spread_odds and ou_odds for the DB patch
         clean_data = {
             "game_id": db_game_id, "game_date": today, "home_team": home_team, "away_team": away_team,
             "home_pitcher": hp_name, "away_pitcher": ap_name, "home_sp_score": hp_score, "away_sp_score": ap_score,
@@ -154,6 +164,8 @@ def run_scraper():
             "ml_away": None if ml_away == "N/A" else ml_away, 
             "spread": None if spread == "N/A" else spread, 
             "ou_total": None if ou_total == "N/A" else ou_total,
+            "spread_odds": None if spread_odds_str == "N/A" else spread_odds_str,
+            "ou_odds": None if ou_odds_str == "N/A" else ou_odds_str,
             "projected_home_runs": 0.0, "projected_away_runs": 0.0
         }
 
@@ -162,12 +174,12 @@ def run_scraper():
             game_id, game_date, home_team, away_team, home_pitcher, away_pitcher,
             home_sp_score, away_sp_score, home_bp_score, away_bp_score, home_fatigue, away_fatigue,
             home_lineup_mult, away_lineup_mult, temp, wind_speed, wind_dir, park_factor, umpire_multiplier,
-            ml_home, ml_away, spread, ou_total, projected_home_runs, projected_away_runs, status
+            ml_home, ml_away, spread, ou_total, spread_odds, ou_odds, projected_home_runs, projected_away_runs, status
         ) VALUES (
             :game_id, :game_date, :home_team, :away_team, :home_pitcher, :away_pitcher,
             :home_sp_score, :away_sp_score, :home_bp_score, :away_bp_score, :home_fatigue, :away_fatigue,
             :home_lineup_mult, :away_lineup_mult, :temp, :wind_speed, :wind_dir, :park_factor, :umpire_multiplier,
-            :ml_home, :ml_away, :spread, :ou_total, :projected_home_runs, :projected_away_runs, 'PENDING'
+            :ml_home, :ml_away, :spread, :ou_total, :spread_odds, :ou_odds, :projected_home_runs, :projected_away_runs, 'PENDING'
         )
         ON CONFLICT(game_id) DO UPDATE SET
             home_pitcher=excluded.home_pitcher, away_pitcher=excluded.away_pitcher,
@@ -176,6 +188,7 @@ def run_scraper():
             home_lineup_mult=excluded.home_lineup_mult, away_lineup_mult=excluded.away_lineup_mult,
             ml_home=COALESCE(excluded.ml_home, game_logs.ml_home), ml_away=COALESCE(excluded.ml_away, game_logs.ml_away),
             spread=COALESCE(excluded.spread, game_logs.spread), ou_total=COALESCE(excluded.ou_total, game_logs.ou_total),
+            spread_odds=COALESCE(excluded.spread_odds, game_logs.spread_odds), ou_odds=COALESCE(excluded.ou_odds, game_logs.ou_odds),
             temp=excluded.temp, wind_speed=excluded.wind_speed, wind_dir=excluded.wind_dir,
             home_fatigue=excluded.home_fatigue, away_fatigue=excluded.away_fatigue, umpire_multiplier=excluded.umpire_multiplier;
         '''
@@ -194,7 +207,6 @@ def run_scraper():
                     if (r.get('Home Pitcher') == hp_name and r.get('Away Pitcher') == ap_name) or (r.get('Home Pitcher') == 'TBD' or r.get('Away Pitcher') == 'TBD'):
                         is_new = False
                         row_idx = i
-                        # Prevent next game in double-header from matching this same TBD row
                         r['Home Pitcher'] = "MATCHED_DH" 
                         break
                     
@@ -203,8 +215,10 @@ def run_scraper():
                     today, home_team, away_team, hp_name, ap_name, ml_home, ml_away, spread, ou_total, 
                     "N/A", "N/A", "N/A", round(hp_score, 2), round(ap_score, 2), 
                     round(h_bp.get('bp_score', 4.5), 2), round(a_bp.get('bp_score', 4.5), 2), 
-                    round(h_f, 2), round(a_f, 2), temp, wind_sp, wind_dir, "", 
-                    "PASS", "PASS", "PASS", "", "", ""
+                    round(h_f, 2), round(a_f, 2), temp, wind_sp, wind_dir, 
+                    "", 
+                    "PASS", "PASS", "PASS", "", "", "", 
+                    spread_odds_str, ou_odds_str 
                 ]
                 rows_to_insert.append(row)
             else:
@@ -219,9 +233,12 @@ def run_scraper():
                 cells_to_update.append(gspread.Cell(row=row_idx, col=19, value=temp))
                 cells_to_update.append(gspread.Cell(row=row_idx, col=20, value=wind_sp))
                 cells_to_update.append(gspread.Cell(row=row_idx, col=21, value=wind_dir))
+                
+                if spread_odds_str != "N/A": cells_to_update.append(gspread.Cell(row=row_idx, col=29, value=spread_odds_str))
+                if ou_odds_str != "N/A": cells_to_update.append(gspread.Cell(row=row_idx, col=30, value=ou_odds_str))
             
     if sheet and rows_to_insert:
-        sheet.append_rows(rows_to_insert)
+        sheet.append_rows(rows_to_insert, value_input_option="USER_ENTERED")
         print(f"\n✅ Appended {len(rows_to_insert)} new games to Google Sheet.")
         
     if sheet and cells_to_update:

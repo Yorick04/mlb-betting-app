@@ -35,10 +35,10 @@ def run_daily_predictions():
     conn = sqlite3.connect(db_path)
     query = "SELECT * FROM game_logs WHERE status = 'PENDING'"
     df = pd.read_sql_query(query, conn)
-    conn.close()
 
     if df.empty:
         print("\n⚾ No pending games found in the database.")
+        conn.close()
         return
 
     def calculate_wind_impact(row):
@@ -75,6 +75,20 @@ def run_daily_predictions():
     df['ai_projected_home'] = model_home.predict(X_scaled)
     df['ai_projected_away'] = model_away.predict(X_scaled)
     df['ai_projected_total'] = df['ai_projected_home'] + df['ai_projected_away']
+
+    # --- NEW EFFICIENCY: Save Predictions Back to the Database ---
+    cursor = conn.cursor()
+    db_updates = 0
+    for index, row in df.iterrows():
+        cursor.execute('''
+            UPDATE game_logs 
+            SET projected_home_runs = ?, projected_away_runs = ?
+            WHERE game_id = ?
+        ''', (round(row['ai_projected_home'], 2), round(row['ai_projected_away'], 2), row['game_id']))
+        db_updates += 1
+    conn.commit()
+    conn.close()
+    print(f"✅ Saved AI Projections to DB for {db_updates} games.")
 
     print("📡 Connecting to Google Sheets...")
     try:
@@ -143,8 +157,6 @@ def run_daily_predictions():
         
         if pd.notna(spread_val) and str(spread_val) != 'N/A':
             try:
-                # 'line' is the sportsbook's Home Spread (usually -1.5 or +1.5)
-                # 'predicted_diff' is AI's expected Home margin
                 line = float(spread_val)
                 home_cover_margin = predicted_diff + line
                 

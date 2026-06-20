@@ -101,14 +101,13 @@ def update_master_results():
     if db_updates > 0:
         print(f"✅ SQLite Database updated with {db_updates} finalized games.")
 
-    # 5. GOOGLE SHEET UPDATE (Pops games from list to handle double headers in order)
+    # 5. GOOGLE SHEET UPDATE
     cells_to_update = []
     for i, row in enumerate(all_rows, start=2):
         row_date = str(row.get('Date (CT)', ''))
         score_key = f"{row_date}_{row.get('Home')}_{row.get('Away')}"
         
         if str(row.get('Result', '')).strip() == "" and score_key in scores and len(scores[score_key]) > 0:
-            # Pop the first game from the list to assign it to this row, leaving Game 2 for the next row
             game_data = scores[score_key].pop(0) 
             
             if game_data["status"] == "PPD":
@@ -121,7 +120,8 @@ def update_master_results():
             actual_total = game_data["total"]
             formatted_actual = f"H: {actual_home} | A: {actual_away} | T: {actual_total}"
             
-            t_pick = str(row.get('Total Pick', 'PASS')).strip().upper()
+            # --- FIXED HEADERS: Match exact sheet columns ---
+            t_pick = str(row.get('O/U Total Market', 'PASS')).strip().upper()
             m_pick = str(row.get('ML Pick', 'PASS')).strip().upper()
             s_pick = str(row.get('Spread Pick', 'PASS')).strip().upper()
             
@@ -132,7 +132,8 @@ def update_master_results():
                 line = extract_line(t_pick)
                 if line is None:
                     try:
-                        line = float(row.get('O/U Total', 0))
+                        # Fixed to safely catch either variation of your Over/Under base column
+                        line = float(row.get('O/U Total Base', row.get('O/U Total', 0)))
                     except:
                         line = 0.0
                         

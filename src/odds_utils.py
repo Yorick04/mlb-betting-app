@@ -84,6 +84,7 @@ def get_mlb_odds():
                 'ml_home': "N/A", 'ml_away': "N/A", 'total': "N/A", 'ou_total': "N/A", 'spread': "N/A",
                 'rl_home_point': "N/A", 'rl_home_price': "N/A",
                 'rl_away_point': "N/A", 'rl_away_price': "N/A",
+                'ou_over_price': "N/A", 'ou_under_price': "N/A",
                 'book': 'DraftKings'
             }
             
@@ -96,6 +97,9 @@ def get_mlb_odds():
                         point = market['outcomes'][0].get('point', 'N/A')
                         odds_data['total'] = point
                         odds_data['ou_total'] = point
+                        # Added capture logic for over/under odds prices
+                        odds_data['ou_over_price'] = next((o['price'] for o in market['outcomes'] if o['name'] == 'Over'), "N/A")
+                        odds_data['ou_under_price'] = next((o['price'] for o in market['outcomes'] if o['name'] == 'Under'), "N/A")
                     elif market['key'] == 'spreads':
                         # Final transformation: Lock onto the standard +/- 1.5 runline to reject wild alternate spreads
                         standard_outcomes = [o for o in market['outcomes'] if abs(float(o.get('point', 0))) == 1.5]
