@@ -52,8 +52,8 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Pull any new changes the human pushed while the bot was running!
-          git pull --rebase origin main
+          # Automatically stash uncommitted changes, pull your updates, and pop the stash back!
+          git pull --rebase --autostash origin main
           
           # Stage the updated database and new AI models
           git add mlb_historical_data.db || true
